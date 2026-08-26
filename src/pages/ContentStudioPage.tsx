@@ -1,13 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PageHeader } from "../components/PageHeader";
 import { EmptyState, ErrorState, LoadingState } from "../components/States";
 import { apiGet, apiJson, apiRequest, AppError, uploadVisualFile } from "../lib/api";
-import type { ContentBranch, ContentItem, ContentType, GenerationJob, ProductSummary, VisualDraft, VisualLayout } from "../types";
+import type { ContentBranch, ContentItem, ContentType, GenerationJob, ProductSummary, TrainingSession, VisualDraft, VisualLayout } from "../types";
 
 const labels = {
   image: { eyebrow: "AI IMAGE STUDIO", title: "AI图片创作", description: "先确认保险营销文案，再由千问生成无关键文字视觉素材并进行确定性排版。" },
   article: { eyebrow: "AI ARTICLE", title: "AI文章创作", description: "公众号与小红书框架独立确认，单渠道失败不影响另一渠道。" },
-  training: { eyebrow: "AI TRAINING", title: "AI动画培训", description: "先确认课程框架和讲稿，为后续语音、字幕与答题准备内容。" },
+  training: { eyebrow: "AI TRAINING", title: "AI动画培训", description: "确认课程框架和讲稿后，在浏览器内播放中文语音、同步字幕并完成测试。" },
 };
 
 const channelLabel = { wechat: "公众号", xiaohongshu: "小红书" };
@@ -167,6 +167,44 @@ export function ContentStudioPage({ type }: { type: ContentType }) {
     finally { setBusy(false); }
   }
 
+  async function unlockScript() {
+    if (!active || !window.confirm("解锁后可修改讲稿，当前播放进度和答题结果会标记为过期。确定继续吗？")) return;
+    setBusy(true); setError(null);
+    try {
+      const result = await apiJson<ContentItem>(`/contents/${active.id}/unlock-script`, "POST", { revision: active.revision });
+      setActive(result); setNotice("培训讲稿已解锁，既有播放会话已标记为过期");
+    } catch (reason) { setError(reason instanceof AppError ? reason.message : "解锁失败"); }
+    finally { setBusy(false); }
+  }
+
+  async function saveTrainingSession(session: Pick<TrainingSession, "chapterIndex" | "sentenceIndex" | "playbackRate" | "mode" | "answers">) {
+    if (!active) return;
+    try {
+      const result = await apiJson<ContentItem>(`/contents/${active.id}/training-session`, "PATCH", { revision: active.revision, ...session });
+      setActive(result);
+    } catch (reason) { setError(reason instanceof AppError ? reason.message : "培训进度保存失败"); }
+  }
+
+  async function submitTrainingQuiz(answers: string[]) {
+    if (!active) return;
+    setBusy(true); setError(null);
+    try {
+      const result = await apiJson<ContentItem>(`/contents/${active.id}/training-quiz/submit`, "POST", { revision: active.revision, answers });
+      setActive(result); setNotice("测试已提交，评分和逐题解析已保存");
+    } catch (reason) { setError(reason instanceof AppError ? reason.message : "测试提交失败"); }
+    finally { setBusy(false); }
+  }
+
+  async function resetTrainingQuiz() {
+    if (!active || !window.confirm("确认清空本次答案并重新答题吗？历史尝试次数会保留。")) return;
+    setBusy(true); setError(null);
+    try {
+      const result = await apiJson<ContentItem>(`/contents/${active.id}/training-quiz/reset`, "POST", { revision: active.revision });
+      setActive(result); setNotice("测试已重置，可以重新作答");
+    } catch (reason) { setError(reason instanceof AppError ? reason.message : "重新答题失败"); }
+    finally { setBusy(false); }
+  }
+
   async function saveVisualLayout(layout: Pick<VisualLayout, "template" | "palette" | "blockOrder" | "hiddenBlockIds">) {
     if (!active) return;
     setBusy(true); setError(null);
@@ -195,16 +233,16 @@ export function ContentStudioPage({ type }: { type: ContentType }) {
   return <div className="page-stack">
     <PageHeader eyebrow={meta.eyebrow} title={meta.title} description={meta.description} actions={<button className="button" type="button" onClick={() => { setTitle(""); setManualSource(""); setError(null); setShowCreate(true); }}>＋ 新建创作</button>} />
     {(error || notice) && <div className={error ? "feedback-bar feedback-bar--error" : "feedback-bar"} role={error ? "alert" : "status"}>{error ?? notice}</div>}
-    {active ? <Studio type={type} item={active} busy={busy} onBack={() => { setActive(null); setError(null); void loadList(); }} onRun={runTask} onRetry={retryJob} onCancel={cancelJob} onConfirm={confirm} onSaveManual={saveManual} onUnlockCopy={unlockCopy} onSaveVisualLayout={saveVisualLayout} onUploadVisual={uploadVisual} /> : items.length ? <section className="content-project-grid">{items.map((item) => <button type="button" className="content-project-card" key={item.id} onClick={() => void openItem(item.id)}><span className="status-badge">{item.status}</span><span className="eyebrow">{item.type.toUpperCase()}</span><strong>{item.title}</strong><small>修订 {item.revision} · {new Date(item.updatedAt).toLocaleString("zh-CN")}</small><i>继续创作 →</i></button>)}</section> : <EmptyState title={`还没有${meta.title}项目`} description="新建草稿后，生成失败或刷新页面都不会丢失已经完成的输入。" action={<button className="button" type="button" onClick={() => setShowCreate(true)}>新建第一个项目</button>} />}
+    {active ? <Studio type={type} item={active} busy={busy} onBack={() => { setActive(null); setError(null); void loadList(); }} onRun={runTask} onRetry={retryJob} onCancel={cancelJob} onConfirm={confirm} onSaveManual={saveManual} onUnlockCopy={unlockCopy} onUnlockScript={unlockScript} onSaveVisualLayout={saveVisualLayout} onUploadVisual={uploadVisual} onSaveTrainingSession={saveTrainingSession} onSubmitTrainingQuiz={submitTrainingQuiz} onResetTrainingQuiz={resetTrainingQuiz} /> : items.length ? <section className="content-project-grid">{items.map((item) => <button type="button" className="content-project-card" key={item.id} onClick={() => void openItem(item.id)}><span className="status-badge">{item.status}</span><span className="eyebrow">{item.type.toUpperCase()}</span><strong>{item.title}</strong><small>修订 {item.revision} · {new Date(item.updatedAt).toLocaleString("zh-CN")}</small><i>继续创作 →</i></button>)}</section> : <EmptyState title={`还没有${meta.title}项目`} description="新建草稿后，生成失败或刷新页面都不会丢失已经完成的输入。" action={<button className="button" type="button" onClick={() => setShowCreate(true)}>新建第一个项目</button>} />}
     {showCreate && <div className="modal-backdrop"><section className="modal-card studio-create" role="dialog" aria-modal="true" aria-labelledby="content-create-title"><span className="eyebrow">NEW AI CONTENT</span><h2 id="content-create-title">新建{meta.title}草稿</h2><p>选择已确认产品，或不选择产品并填写人工素材。AI Key 只由后端读取。</p><label className="field"><span>项目标题 *</span><input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label className="field"><span>已确认产品</span><select value={productId} onChange={(event) => setProductId(event.target.value)}><option value="">不使用产品档案</option>{products.map((product) => <option value={product.id} key={product.id}>{product.name}</option>)}</select></label><label className="field"><span>人工补充素材</span><textarea rows={4} value={manualSource} onChange={(event) => setManualSource(event.target.value)} placeholder="可补充受众、场景、限制或自有素材" /></label>{type === "article" && <fieldset className="channel-picker"><legend>发布渠道 *</legend>{(["wechat", "xiaohongshu"] as const).map((channel) => <label key={channel}><input type="checkbox" checked={channels.includes(channel)} onChange={(event) => setChannels((current) => event.target.checked ? [...current, channel] : current.filter((item) => item !== channel))} />{channelLabel[channel]}</label>)}</fieldset>}<div className="modal-actions"><button className="button button--secondary" type="button" disabled={busy} onClick={() => setShowCreate(false)}>取消</button><button className="button" type="button" disabled={busy || (type === "article" && !channels.length)} onClick={() => void createItem()}>创建草稿</button></div></section></div>}
   </div>;
 }
 
-function Studio({ type, item, busy, onBack, onRun, onRetry, onCancel, onConfirm, onSaveManual, onUnlockCopy, onSaveVisualLayout, onUploadVisual }: { type: ContentType; item: ContentItem; busy: boolean; onBack: () => void; onRun: (task: string, branchId?: string, instruction?: string) => Promise<void>; onRetry: (job: GenerationJob) => Promise<void>; onCancel: (job: GenerationJob) => Promise<void>; onConfirm: (node: string, branchId?: string) => Promise<void>; onSaveManual: (task: string, output: Record<string, unknown>, branchId?: string) => Promise<void>; onUnlockCopy: () => Promise<void>; onSaveVisualLayout: (layout: Pick<VisualLayout, "template" | "palette" | "blockOrder" | "hiddenBlockIds">) => Promise<void>; onUploadVisual: (file: File) => Promise<void> }) {
+function Studio({ type, item, busy, onBack, onRun, onRetry, onCancel, onConfirm, onSaveManual, onUnlockCopy, onUnlockScript, onSaveVisualLayout, onUploadVisual, onSaveTrainingSession, onSubmitTrainingQuiz, onResetTrainingQuiz }: { type: ContentType; item: ContentItem; busy: boolean; onBack: () => void; onRun: (task: string, branchId?: string, instruction?: string) => Promise<void>; onRetry: (job: GenerationJob) => Promise<void>; onCancel: (job: GenerationJob) => Promise<void>; onConfirm: (node: string, branchId?: string) => Promise<void>; onSaveManual: (task: string, output: Record<string, unknown>, branchId?: string) => Promise<void>; onUnlockCopy: () => Promise<void>; onUnlockScript: () => Promise<void>; onSaveVisualLayout: (layout: Pick<VisualLayout, "template" | "palette" | "blockOrder" | "hiddenBlockIds">) => Promise<void>; onUploadVisual: (file: File) => Promise<void>; onSaveTrainingSession: (session: Pick<TrainingSession, "chapterIndex" | "sentenceIndex" | "playbackRate" | "mode" | "answers">) => Promise<void>; onSubmitTrainingQuiz: (answers: string[]) => Promise<void>; onResetTrainingQuiz: () => Promise<void> }) {
   return <div className="page-stack"><button className="back-link studio-back" type="button" onClick={onBack}>← 返回项目列表</button><section className="panel studio-summary"><div><span className="eyebrow">CONTENT DRAFT</span><h2>{item.title}</h2><p>修订 {item.revision} · {item.productId ? "使用已确认产品" : "使用人工素材"}</p></div><span className="status-badge">{item.status}</span></section>
     {type === "image" && <ImageStudio item={item} busy={busy} onRun={onRun} onConfirm={onConfirm} onSaveManual={onSaveManual} onUnlockCopy={onUnlockCopy} onSaveVisualLayout={onSaveVisualLayout} onUploadVisual={onUploadVisual} />}
     {type === "article" && <div className="branch-grid">{item.branches.map((branch) => <ArticleBranch key={branch.id} item={item} branch={branch} busy={busy} onRun={onRun} onConfirm={onConfirm} onSaveManual={onSaveManual} />)}</div>}
-    {type === "training" && <TrainingStudio item={item} busy={busy} onRun={onRun} onConfirm={onConfirm} onSaveManual={onSaveManual} />}
+    {type === "training" && <TrainingStudio item={item} busy={busy} onRun={onRun} onConfirm={onConfirm} onSaveManual={onSaveManual} onUnlockScript={onUnlockScript} onSaveSession={onSaveTrainingSession} onSubmitQuiz={onSubmitTrainingQuiz} onResetQuiz={onResetTrainingQuiz} />}
     <JobPanel item={item} jobs={item.jobs} busy={busy} onRetry={onRetry} onCancel={onCancel} />
   </div>;
 }
@@ -264,10 +302,160 @@ function ArticleBranch({ item, branch, busy, onRun, onConfirm, onSaveManual }: {
   return <section className="panel studio-node"><div className="panel__heading"><div><span className="eyebrow">{branch.channel.toUpperCase()}</span><h2>{channelLabel[branch.channel]}分支</h2></div><span className="status-badge">框架 {branch.outlineStatus}</span></div>{branch.outlineStatus === "empty" ? <p className="studio-hint">该渠道拥有独立框架、失败和重试状态。</p> : <pre className="structured-output">{pretty(branch.outline)}</pre>}<ManualJsonEditor task="article_outline" value={branch.outline} disabled={busy || branch.outlineStatus === "confirmed"} onSave={(output) => onSaveManual("article_outline", output, branch.id)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || branch.outlineStatus === "confirmed"} onClick={() => void onRun("article_outline", branch.id)}>{branch.outlineStatus === "empty" ? "生成框架" : "重新生成框架"}</button>{branch.outlineStatus === "draft" && <button className="button" type="button" disabled={busy} onClick={() => void onConfirm("outline", branch.id)}>确认框架</button>}</div>{branch.outlineStatus === "confirmed" && <div className="article-body"><h3>完整文章</h3>{branch.bodyStatus === "empty" ? <p className="studio-hint">框架已锁定，可以生成全文。</p> : <pre className="structured-output">{pretty(branch.body)}</pre>}<ManualJsonEditor task="article_generate" value={branch.body} disabled={busy} onSave={(output) => onSaveManual("article_generate", output, branch.id)} /><button className="button" type="button" disabled={busy} onClick={() => void onRun("article_generate", branch.id)}>{branch.bodyStatus === "empty" ? "生成全文" : "重新生成全文"}</button></div>}</section>;
 }
 
-function TrainingStudio({ item, busy, onRun, onConfirm, onSaveManual }: any) {
+function TrainingStudio({ item, busy, onRun, onConfirm, onSaveManual, onUnlockScript, onSaveSession, onSubmitQuiz, onResetQuiz }: any) {
   const outline = item.payload.outline, script = item.payload.script;
   const scriptStatus = item.payload.scriptStatus ?? (item.payload.outlineStatus === "confirmed" ? "empty" : "locked");
-  return <div className="training-nodes"><section className="panel studio-node"><div className="panel__heading"><h2>01 课程框架</h2><span className="status-badge">{item.payload.outlineStatus ?? "empty"}</span></div>{outline ? <pre className="structured-output">{pretty(outline)}</pre> : <p className="studio-hint">按培训对象、目的和 3 分钟时长生成章节。</p>}<ManualJsonEditor task="training_outline" value={outline} disabled={busy || item.payload.outlineStatus === "confirmed"} onSave={(output) => onSaveManual("training_outline", output)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || item.payload.outlineStatus === "confirmed"} onClick={() => void onRun("training_outline")}>生成课程框架</button>{outline && item.payload.outlineStatus !== "confirmed" && <button className="button" type="button" onClick={() => void onConfirm("outline")}>确认框架</button>}</div></section><section className="panel studio-node"><div className="panel__heading"><h2>02 培训讲稿</h2><span className="status-badge">{scriptStatus}</span></div>{script ? <pre className="structured-output">{pretty(script)}</pre> : <p className="studio-hint">确认框架后生成逐章讲稿、知识卡和 3 道测试题。</p>}<ManualJsonEditor task="training_script" value={script} disabled={busy || item.payload.outlineStatus !== "confirmed" || item.payload.scriptStatus === "confirmed"} onSave={(output) => onSaveManual("training_script", output)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || item.payload.outlineStatus !== "confirmed" || item.payload.scriptStatus === "confirmed"} onClick={() => void onRun("training_script")}>生成培训讲稿</button>{script && item.payload.scriptStatus !== "confirmed" && <button className="button" type="button" onClick={() => void onConfirm("script")}>确认讲稿</button>}</div></section></div>;
+  const playerReady = Array.isArray(script?.chapters) && script.chapters.length > 0
+    && script.chapters.every((chapter: any) => chapter && typeof chapter.title === "string" && typeof chapter.narration === "string" && typeof chapter.knowledgeCard === "string")
+    && Array.isArray(script?.questions) && script.questions.length === 3
+    && script.questions.every((question: any) => question && typeof question.question === "string" && Array.isArray(question.options) && question.options.length >= 2 && question.options.every((option: unknown) => typeof option === "string") && typeof question.answer === "string" && typeof question.explanation === "string");
+  return <div className="training-nodes">
+    <section className="panel studio-node"><div className="panel__heading"><h2>01 课程框架</h2><span className="status-badge">{item.payload.outlineStatus ?? "empty"}</span></div>{outline ? <pre className="structured-output">{pretty(outline)}</pre> : <p className="studio-hint">按培训对象、目的和 3 分钟时长生成章节。</p>}<ManualJsonEditor task="training_outline" value={outline} disabled={busy || item.payload.outlineStatus === "confirmed"} onSave={(output) => onSaveManual("training_outline", output)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || item.payload.outlineStatus === "confirmed"} onClick={() => void onRun("training_outline")}>生成课程框架</button>{outline && item.payload.outlineStatus !== "confirmed" && <button className="button" type="button" onClick={() => void onConfirm("outline")}>确认框架</button>}</div></section>
+    <section className="panel studio-node"><div className="panel__heading"><h2>02 培训讲稿</h2><span className="status-badge">{scriptStatus}</span></div>{script ? <pre className="structured-output">{pretty(script)}</pre> : <p className="studio-hint">确认框架后生成逐章讲稿、知识卡和 3 道测试题。</p>}<ManualJsonEditor task="training_script" value={script} disabled={busy || item.payload.outlineStatus !== "confirmed" || item.payload.scriptStatus === "confirmed"} onSave={(output) => onSaveManual("training_script", output)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || item.payload.outlineStatus !== "confirmed" || item.payload.scriptStatus === "confirmed"} onClick={() => void onRun("training_script")}>生成培训讲稿</button>{script && item.payload.scriptStatus !== "confirmed" && <button className="button" type="button" onClick={() => void onConfirm("script")}>确认讲稿</button>}{item.payload.scriptStatus === "confirmed" && <button className="button button--secondary" type="button" disabled={busy} onClick={() => void onUnlockScript()}>解锁修改讲稿</button>}</div></section>
+    {script && item.payload.scriptStatus === "confirmed" && playerReady ? <TrainingPlayer item={item} busy={busy} onSaveSession={onSaveSession} onSubmitQuiz={onSubmitQuiz} onResetQuiz={onResetQuiz} /> : <section className="panel training-locked"><span className="eyebrow">PLAYER LOCKED</span><h2>03 互动培训播放器</h2><p>{item.payload.scriptStatus === "confirmed" && !playerReady ? "讲稿章节或 3 道测试题结构不完整，请解锁讲稿修复后重新确认。" : "人工确认讲稿后才开放语音、字幕、章节进度和测试，避免播放未核对内容。"}</p></section>}
+    {item.trainingSession?.status === "stale" && <div className="visual-warning" role="status">讲稿已解锁，旧播放进度和答题结果仅作历史保留；重新确认讲稿后会建立新的播放会话。</div>}
+  </div>;
+}
+
+type TrainingChapter = { title: string; narration: string; knowledgeCard: string };
+type TrainingQuestion = { question: string; options: string[]; answer: string; explanation: string };
+
+function trainingSentences(value: string) {
+  const sentences = value.trim().split(/(?<=[。！？!?])\s*|\n+/).map((part) => part.trim()).filter(Boolean);
+  return sentences.length ? sentences : [value.trim()].filter(Boolean);
+}
+
+function TrainingPlayer({ item, busy, onSaveSession, onSubmitQuiz, onResetQuiz }: { item: ContentItem; busy: boolean; onSaveSession: (session: Pick<TrainingSession, "chapterIndex" | "sentenceIndex" | "playbackRate" | "mode" | "answers">) => Promise<void>; onSubmitQuiz: (answers: string[]) => Promise<void>; onResetQuiz: () => Promise<void> }) {
+  const script = item.payload.script as { chapters: TrainingChapter[]; questions: TrainingQuestion[] };
+  const session = item.trainingSession ?? { chapterIndex: 0, sentenceIndex: 0, playbackRate: 1, mode: "voice", answers: {}, lastScore: null, results: [], attempt: 0, status: "ready", updatedAt: "" };
+  const initialChapter = Math.min(session.chapterIndex, Math.max(script.chapters.length - 1, 0));
+  const [chapterIndex, setChapterIndex] = useState(initialChapter);
+  const [sentenceIndex, setSentenceIndex] = useState(session.sentenceIndex);
+  const [playbackRate, setPlaybackRate] = useState(session.playbackRate);
+  const [mode, setMode] = useState<"voice" | "silent">(session.mode);
+  const [answers, setAnswers] = useState<Record<string, string>>(session.answers);
+  const [playState, setPlayState] = useState<"idle" | "speaking" | "paused">("idle");
+  const [playerNotice, setPlayerNotice] = useState("");
+  const [quizError, setQuizError] = useState("");
+  const timerRef = useRef<number | null>(null);
+  const playToken = useRef(0);
+  const chapter = script.chapters[chapterIndex] ?? script.chapters[0];
+  const sentences = trainingSentences(chapter?.narration ?? "");
+  const safeSentenceIndex = Math.min(sentenceIndex, Math.max(sentences.length - 1, 0));
+  const completed = session.results.length > 0;
+
+  useEffect(() => {
+    setAnswers(session.answers);
+    setQuizError("");
+  }, [session.attempt, session.lastScore]);
+
+  useEffect(() => () => {
+    playToken.current += 1;
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+  }, []);
+
+  const persist = (next: Partial<Pick<TrainingSession, "chapterIndex" | "sentenceIndex" | "playbackRate" | "mode" | "answers">> = {}) => onSaveSession({
+    chapterIndex: next.chapterIndex ?? chapterIndex,
+    sentenceIndex: next.sentenceIndex ?? safeSentenceIndex,
+    playbackRate: next.playbackRate ?? playbackRate,
+    mode: next.mode ?? mode,
+    answers: next.answers ?? answers,
+  });
+
+  function stopPlayback() {
+    playToken.current += 1;
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    timerRef.current = null;
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    setPlayState("idle");
+  }
+
+  function playSentence(index: number, requestedMode: "voice" | "silent" = mode) {
+    playToken.current += 1;
+    const token = playToken.current;
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    const target = Math.min(index, Math.max(sentences.length - 1, 0));
+    setSentenceIndex(target);
+    setPlayState("speaking");
+    void persist({ sentenceIndex: target, mode: requestedMode });
+
+    const advance = () => {
+      if (token !== playToken.current) return;
+      if (target + 1 < sentences.length) playSentence(target + 1, requestedMode);
+      else setPlayState("idle");
+    };
+    const silentFallback = (message = "") => {
+      if (token !== playToken.current) return;
+      setMode("silent");
+      if (message) setPlayerNotice(message);
+      void persist({ sentenceIndex: target, mode: "silent" });
+      const duration = Math.max(900, Math.min(6000, sentences[target].length * 110 / playbackRate));
+      timerRef.current = window.setTimeout(advance, duration);
+    };
+
+    if (requestedMode === "voice" && "speechSynthesis" in window && "SpeechSynthesisUtterance" in window) {
+      const utterance = new SpeechSynthesisUtterance(sentences[target]);
+      const voices = window.speechSynthesis.getVoices();
+      const chineseVoice = voices.find((voice) => voice.lang.toLowerCase().startsWith("zh"));
+      if (voices.length > 0 && !chineseVoice) {
+        silentFallback("未找到中文语音，已切换为静默字幕模式");
+        return;
+      }
+      utterance.lang = "zh-CN";
+      utterance.rate = playbackRate;
+      if (chineseVoice) utterance.voice = chineseVoice;
+      utterance.onend = advance;
+      utterance.onerror = () => silentFallback("中文语音播放失败，已从当前字幕继续静默播放");
+      window.speechSynthesis.speak(utterance);
+    } else {
+      silentFallback(requestedMode === "voice" ? "当前浏览器不支持语音，已切换为静默字幕模式" : "");
+    }
+  }
+
+  function chooseChapter(index: number) {
+    stopPlayback();
+    setChapterIndex(index); setSentenceIndex(0); setPlayerNotice("");
+    void persist({ chapterIndex: index, sentenceIndex: 0 });
+  }
+
+  function pauseOrContinue() {
+    if (playState === "speaking") {
+      if (mode === "voice" && "speechSynthesis" in window) window.speechSynthesis.pause();
+      else if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      setPlayState("paused");
+      return;
+    }
+    if (playState === "paused" && mode === "voice" && "speechSynthesis" in window && window.speechSynthesis.paused) {
+      window.speechSynthesis.resume(); setPlayState("speaking"); return;
+    }
+    playSentence(safeSentenceIndex);
+  }
+
+  function selectAnswer(index: number, answer: string) {
+    const next = { ...answers, [String(index)]: answer };
+    setAnswers(next); setQuizError("");
+    void persist({ answers: next });
+  }
+
+  function submitQuiz() {
+    const selected = script.questions.map((_, index) => answers[String(index)] ?? "");
+    if (selected.some((answer) => !answer)) { setQuizError("请完成全部 3 道题后再提交"); return; }
+    void onSubmitQuiz(selected);
+  }
+
+  return <section className="panel training-player" aria-label="互动培训播放器">
+    <div className="panel__heading"><div><span className="eyebrow">INTERACTIVE COURSE</span><h2>03 互动培训播放器</h2></div><span className={`status-badge status-badge--${playState}`}>{playState === "speaking" ? "播放中" : playState === "paused" ? "已暂停" : completed ? "已完成测试" : "可播放"}</span></div>
+    {playerNotice && <div className="training-notice" role="status">{playerNotice}</div>}
+    <div className="training-player-grid">
+      <nav className="training-chapters" aria-label="课程章节">{script.chapters.map((itemChapter, index) => <button type="button" className={index === chapterIndex ? "is-active" : ""} aria-current={index === chapterIndex ? "step" : undefined} onClick={() => chooseChapter(index)} key={`${itemChapter.title}-${index}`}><span>{String(index + 1).padStart(2, "0")}</span><strong>{itemChapter.title}</strong></button>)}</nav>
+      <div className={`training-stage training-stage--${playState}`}><div className="training-avatar" aria-label={`二维动画讲师${playState === "speaking" ? "正在讲解" : "待机"}`}><span className="training-avatar__head"><i /><b /></span><span className="training-avatar__body" /></div><div className="training-subtitle" aria-live="polite"><small>{chapter?.title}</small><p>{sentences[safeSentenceIndex]}</p><span>字幕 {safeSentenceIndex + 1} / {sentences.length}</span></div></div>
+      <aside className="training-knowledge"><span className="eyebrow">KNOWLEDGE CARD</span><h3>本章知识卡</h3><p>{chapter?.knowledgeCard}</p><label className="field"><span>播放语速</span><select aria-label="培训播放语速" value={playbackRate} onChange={(event) => { const next = Number(event.target.value); stopPlayback(); setPlaybackRate(next); void persist({ playbackRate: next }); }}><option value="0.75">0.75×</option><option value="1">1.0×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option></select></label><button className="button button--secondary" type="button" onClick={() => { stopPlayback(); const next = mode === "voice" ? "silent" : "voice"; setMode(next); setPlayerNotice(next === "silent" ? "已手动切换为静默字幕模式" : "已切换为中文语音模式"); void persist({ mode: next }); }}>{mode === "voice" ? "切换静默字幕" : "尝试中文语音"}</button></aside>
+    </div>
+    <div className="training-controls"><button className="button" type="button" onClick={() => playSentence(safeSentenceIndex)} disabled={!sentences.length}>{playState === "idle" ? "播放当前章节" : "从当前句播放"}</button><button className="button button--secondary" type="button" onClick={pauseOrContinue} disabled={playState === "idle"}>{playState === "paused" ? "继续" : "暂停"}</button><button className="button button--secondary" type="button" onClick={() => { stopPlayback(); setSentenceIndex(0); playSentence(0); }}>重播本章</button><span>{mode === "voice" ? "中文语音 + 同步字幕" : "静默字幕模式"}</span></div>
+    <div className="training-quiz"><div className="training-quiz__heading"><div><span className="eyebrow">KNOWLEDGE CHECK</span><h3>课程测试 · 3 道单选题</h3></div>{session.attempt > 0 && <span>已提交 {session.attempt} 次</span>}</div>{script.questions.map((question, index) => { const result = session.results[index]; return <fieldset className={result ? (result.correct ? "is-correct" : "is-wrong") : ""} key={`${question.question}-${index}`}><legend>{index + 1}. {question.question}</legend>{question.options.map((option) => <label key={option}><input type="radio" name={`training-question-${index}`} checked={answers[String(index)] === option} disabled={busy || completed} onChange={() => selectAnswer(index, option)} />{option}</label>)}{result && <div className="training-answer"><strong>{result.correct ? "回答正确" : `回答错误 · 正确答案：${result.correctAnswer}`}</strong><p>{result.explanation}</p></div>}</fieldset>; })}{quizError && <p className="training-quiz__error" role="alert">{quizError}</p>}<div className="node-actions">{completed ? <><strong className="training-score">得分 {session.lastScore} / 3</strong><button className="button button--secondary" type="button" disabled={busy} onClick={() => void onResetQuiz()}>重新答题</button></> : <button className="button" type="button" disabled={busy} onClick={submitQuiz}>提交答案</button>}</div></div>
+  </section>;
 }
 
 function isJobLocked(item: ContentItem, job: GenerationJob) {

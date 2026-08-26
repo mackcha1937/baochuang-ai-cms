@@ -119,6 +119,27 @@ class VisualLayoutRequest(BaseModel):
         return value
 
 
+class TrainingSessionRequest(BaseModel):
+    revision: int = Field(ge=1)
+    chapterIndex: int = Field(ge=0, le=99)
+    sentenceIndex: int = Field(ge=0, le=999)
+    playbackRate: float = Field(ge=0.5, le=2.0)
+    mode: str
+    answers: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("mode")
+    @classmethod
+    def valid_mode(cls, value: str) -> str:
+        if value not in {"voice", "silent"}:
+            raise ValueError("不支持的播放模式")
+        return value
+
+
+class TrainingQuizRequest(BaseModel):
+    revision: int = Field(ge=1)
+    answers: list[str] = Field(min_length=3, max_length=3)
+
+
 ALLOWED_FILES = {
     ".pdf": {"application/pdf", "application/octet-stream"},
     ".docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/octet-stream"},
@@ -501,6 +522,57 @@ def create_app(
             if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "内容已更新，请刷新后重试") from exc
             if code == "invalid_task": raise ApiError(422, "CONTENT_TYPE_INVALID", "仅图片项目支持解锁图片文案") from exc
             raise ApiError(409, "CONTENT_STATE_CONFLICT", "图片文案当前不需要解锁") from exc
+
+    @app.post("/api/v1/contents/{content_id}/unlock-script")
+    def unlock_training_script(content_id: str, payload: RevisionRequest, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
+        try:
+            return content_repository.unlock_training_script(user["id"], content_id, payload.revision)
+        except ValueError as exc:
+            code = str(exc)
+            if code == "missing": raise ApiError(404, "CONTENT_NOT_FOUND", "内容草稿不存在") from exc
+            if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "内容已更新，请刷新后重试") from exc
+            if code == "invalid_task": raise ApiError(422, "CONTENT_TYPE_INVALID", "仅培训项目支持解锁讲稿") from exc
+            raise ApiError(409, "CONTENT_STATE_CONFLICT", "培训讲稿当前不需要解锁") from exc
+
+    @app.patch("/api/v1/contents/{content_id}/training-session")
+    def save_training_session(content_id: str, payload: TrainingSessionRequest, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
+        try:
+            return content_repository.save_training_session(
+                user["id"], content_id, payload.revision, payload.chapterIndex,
+                payload.sentenceIndex, payload.playbackRate, payload.mode, payload.answers,
+            )
+        except ValueError as exc:
+            code = str(exc)
+            if code == "missing": raise ApiError(404, "CONTENT_NOT_FOUND", "培训项目不存在") from exc
+            if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "培训内容已更新，请刷新后重试") from exc
+            if code == "invalid_task": raise ApiError(422, "CONTENT_TYPE_INVALID", "仅培训项目支持保存播放进度") from exc
+            if code == "script_not_confirmed": raise ApiError(422, "TRAINING_SCRIPT_NOT_CONFIRMED", "请先确认培训讲稿") from exc
+            if code == "answers_invalid": raise ApiError(422, "TRAINING_ANSWERS_INVALID", "答案不属于当前题目选项") from exc
+            raise ApiError(422, "TRAINING_PROGRESS_INVALID", "章节、字幕进度或播放设置无效") from exc
+
+    @app.post("/api/v1/contents/{content_id}/training-quiz/submit")
+    def submit_training_quiz(content_id: str, payload: TrainingQuizRequest, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
+        try:
+            return content_repository.submit_training_quiz(user["id"], content_id, payload.revision, payload.answers)
+        except ValueError as exc:
+            code = str(exc)
+            if code == "missing": raise ApiError(404, "CONTENT_NOT_FOUND", "培训项目不存在") from exc
+            if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "培训内容已更新，请刷新后重试") from exc
+            if code == "invalid_task": raise ApiError(422, "CONTENT_TYPE_INVALID", "仅培训项目支持答题") from exc
+            if code == "script_not_confirmed": raise ApiError(422, "TRAINING_SCRIPT_NOT_CONFIRMED", "请先确认培训讲稿") from exc
+            if code == "answers_incomplete": raise ApiError(422, "TRAINING_ANSWERS_INCOMPLETE", "请完成全部 3 道题后再提交") from exc
+            raise ApiError(422, "TRAINING_ANSWERS_INVALID", "答案不属于当前题目选项") from exc
+
+    @app.post("/api/v1/contents/{content_id}/training-quiz/reset")
+    def reset_training_quiz(content_id: str, payload: RevisionRequest, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
+        try:
+            return content_repository.reset_training_quiz(user["id"], content_id, payload.revision)
+        except ValueError as exc:
+            code = str(exc)
+            if code == "missing": raise ApiError(404, "CONTENT_NOT_FOUND", "培训项目不存在") from exc
+            if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "培训内容已更新，请刷新后重试") from exc
+            if code == "invalid_task": raise ApiError(422, "CONTENT_TYPE_INVALID", "仅培训项目支持重新答题") from exc
+            raise ApiError(422, "TRAINING_SCRIPT_NOT_CONFIRMED", "请先确认培训讲稿") from exc
 
     @app.put("/api/v1/contents/{content_id}/manual-output")
     def save_manual_output(content_id: str, payload: ManualOutputRequest, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:

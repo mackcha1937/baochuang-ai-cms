@@ -68,12 +68,21 @@ CREATE TABLE IF NOT EXISTS visual_assets (
     size_bytes INTEGER NOT NULL, checksum TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'ready', created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS training_sessions (
+    content_id TEXT PRIMARY KEY REFERENCES content_items(id) ON DELETE CASCADE,
+    chapter_index INTEGER NOT NULL DEFAULT 0, sentence_index INTEGER NOT NULL DEFAULT 0,
+    playback_rate REAL NOT NULL DEFAULT 1.0, mode TEXT NOT NULL DEFAULT 'voice',
+    answers_json TEXT NOT NULL DEFAULT '{}', last_score INTEGER,
+    results_json TEXT NOT NULL DEFAULT '[]', attempt INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'ready', updated_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_products_updated ON products(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_source_documents_product ON source_documents(product_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_time ON audit_logs(occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_content_items_updated ON content_items(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_generation_jobs_content ON generation_jobs(content_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_visual_assets_content ON visual_assets(content_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_training_sessions_updated ON training_sessions(updated_at DESC);
 """
 
 DEFAULT_FACTS = ["投保年龄", "保障期间", "等待期", "缴费期间"]

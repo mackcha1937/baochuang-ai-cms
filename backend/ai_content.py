@@ -290,6 +290,12 @@ def repair_training_script_grounding(snapshot: dict[str, Any], result: dict[str,
     return {"chapters": repaired_chapters, "questions": repaired_questions}
 
 
+def split_narration_sentences(value: str) -> list[str]:
+    """Split narration with the same deterministic units used for saved progress."""
+    sentences = [part.strip() for part in re.split(r"(?<=[。！？!?])\s*|\n+", value.strip()) if part.strip()]
+    return sentences or ([value.strip()] if value.strip() else [])
+
+
 @dataclass
 class ContentRepository:
     database: Database
@@ -331,8 +337,13 @@ class ContentRepository:
                 return None
             branches = [self._branch(item) for item in connection.execute("SELECT * FROM content_branches WHERE content_id = ? ORDER BY channel", (content_id,)).fetchall()]
             jobs = [self._job(item) for item in connection.execute("SELECT * FROM generation_jobs WHERE content_id = ? ORDER BY created_at DESC", (content_id,)).fetchall()]
+            training_session = connection.execute("SELECT * FROM training_sessions WHERE content_id = ?", (content_id,)).fetchone() if row["type"] == "training" else None
         item = self._summary(row)
-        item.update({"manualSource": row["manual_source"], "settings": json.loads(row["settings_json"]), "payload": json.loads(row["payload_json"]), "branches": branches, "jobs": jobs, "ownerId": row["owner_id"]})
+        payload = json.loads(row["payload_json"])
+        item.update({"manualSource": row["manual_source"], "settings": json.loads(row["settings_json"]), "payload": payload, "branches": branches, "jobs": jobs, "ownerId": row["owner_id"]})
+        if row["type"] == "training":
+            fallback_status = "ready" if payload.get("scriptStatus") == "confirmed" else "locked"
+            item["trainingSession"] = self._training_session(training_session, fallback_status)
         return item
 
     def create_job(self, actor_id: str, content_id: str, task_type: str, branch_id: Optional[str], idempotency_key: str, instruction: str = "") -> tuple[dict[str, Any], bool]:
@@ -694,6 +705,17 @@ class ContentRepository:
                 if item["type"] == "training" and node == "outline":
                     payload.setdefault("scriptStatus", "empty")
                 connection.execute("UPDATE content_items SET payload_json = ? WHERE id = ?", (json.dumps(payload, ensure_ascii=False), content_id))
+                if item["type"] == "training" and node == "script":
+                    connection.execute(
+                        """INSERT INTO training_sessions
+                           (content_id, chapter_index, sentence_index, playback_rate, mode, answers_json,
+                            last_score, results_json, attempt, status, updated_at)
+                           VALUES (?, 0, 0, 1.0, 'voice', '{}', NULL, '[]', 0, 'ready', ?)
+                           ON CONFLICT(content_id) DO UPDATE SET chapter_index = 0, sentence_index = 0,
+                           playback_rate = 1.0, mode = 'voice', answers_json = '{}', last_score = NULL,
+                           results_json = '[]', attempt = 0, status = 'ready', updated_at = excluded.updated_at""",
+                        (content_id, timestamp),
+                    )
             connection.execute("UPDATE content_items SET revision = revision + 1, updated_at = ? WHERE id = ?", (timestamp, content_id))
             Database._audit(connection, actor_id, f"content.confirm.{node}", "content", content_id, f"确认 {node} 节点")
         result = self.get_item(content_id)
@@ -721,6 +743,167 @@ class ContentRepository:
                 (json.dumps(payload, ensure_ascii=False), timestamp, content_id),
             )
             Database._audit(connection, actor_id, "content.unlock.copy", "content", content_id, "解锁图片文案并标记既有视觉需重新排版")
+        result = self.get_item(content_id)
+        assert result is not None
+        return result
+
+    def unlock_training_script(self, actor_id: str, content_id: str, revision: int) -> dict[str, Any]:
+        timestamp = now_iso()
+        with self.database.connect() as connection:
+            item = connection.execute("SELECT * FROM content_items WHERE id = ?", (content_id,)).fetchone()
+            if item is None:
+                raise ValueError("missing")
+            if item["type"] != "training":
+                raise ValueError("invalid_task")
+            if item["revision"] != revision:
+                raise ValueError("conflict")
+            payload = json.loads(item["payload_json"])
+            if payload.get("scriptStatus") != "confirmed":
+                raise ValueError("state")
+            payload["scriptStatus"] = "draft"
+            connection.execute(
+                "UPDATE content_items SET payload_json = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                (json.dumps(payload, ensure_ascii=False), timestamp, content_id),
+            )
+            connection.execute(
+                """INSERT INTO training_sessions (content_id, status, updated_at)
+                   VALUES (?, 'stale', ?)
+                   ON CONFLICT(content_id) DO UPDATE SET status = 'stale', updated_at = excluded.updated_at""",
+                (content_id, timestamp),
+            )
+            Database._audit(connection, actor_id, "content.unlock.script", "content", content_id, "解锁培训讲稿并标记播放会话已过期")
+        result = self.get_item(content_id)
+        assert result is not None
+        return result
+
+    def save_training_session(
+        self,
+        actor_id: str,
+        content_id: str,
+        revision: int,
+        chapter_index: int,
+        sentence_index: int,
+        playback_rate: float,
+        mode: str,
+        answers: dict[str, str],
+    ) -> dict[str, Any]:
+        timestamp = now_iso()
+        with self.database.connect() as connection:
+            item = connection.execute("SELECT * FROM content_items WHERE id = ?", (content_id,)).fetchone()
+            if item is None:
+                raise ValueError("missing")
+            if item["type"] != "training":
+                raise ValueError("invalid_task")
+            if item["revision"] != revision:
+                raise ValueError("conflict")
+            payload = json.loads(item["payload_json"])
+            if payload.get("scriptStatus") != "confirmed" or not isinstance(payload.get("script"), dict):
+                raise ValueError("script_not_confirmed")
+            script = payload["script"]
+            chapters = script.get("chapters") if isinstance(script.get("chapters"), list) else []
+            questions = script.get("questions") if isinstance(script.get("questions"), list) else []
+            if not 0 <= chapter_index < len(chapters):
+                raise ValueError("progress_invalid")
+            narration = str(chapters[chapter_index].get("narration", "")) if isinstance(chapters[chapter_index], dict) else ""
+            sentences = split_narration_sentences(narration)
+            if not sentences or not 0 <= sentence_index < len(sentences):
+                raise ValueError("progress_invalid")
+            if mode not in {"voice", "silent"} or not 0.5 <= playback_rate <= 2.0:
+                raise ValueError("progress_invalid")
+            if len(answers) > 3:
+                raise ValueError("answers_invalid")
+            for raw_index, answer in answers.items():
+                if not raw_index.isdigit():
+                    raise ValueError("answers_invalid")
+                index = int(raw_index)
+                if not 0 <= index < len(questions) or not isinstance(questions[index], dict):
+                    raise ValueError("answers_invalid")
+                options = questions[index].get("options")
+                if not isinstance(options, list) or answer not in options:
+                    raise ValueError("answers_invalid")
+            connection.execute(
+                """INSERT INTO training_sessions
+                   (content_id, chapter_index, sentence_index, playback_rate, mode, answers_json,
+                    last_score, results_json, attempt, status, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, NULL, '[]', 0, 'ready', ?)
+                   ON CONFLICT(content_id) DO UPDATE SET chapter_index = excluded.chapter_index,
+                   sentence_index = excluded.sentence_index, playback_rate = excluded.playback_rate,
+                   mode = excluded.mode, answers_json = excluded.answers_json,
+                   updated_at = excluded.updated_at""",
+                (content_id, chapter_index, sentence_index, playback_rate, mode, json.dumps(answers, ensure_ascii=False), timestamp),
+            )
+            Database._audit(connection, actor_id, "training.progress.save", "content", content_id, f"保存培训进度：章节 {chapter_index + 1}")
+        result = self.get_item(content_id)
+        assert result is not None
+        return result
+
+    def submit_training_quiz(self, actor_id: str, content_id: str, revision: int, answers: list[str]) -> dict[str, Any]:
+        timestamp = now_iso()
+        with self.database.connect() as connection:
+            item = connection.execute("SELECT * FROM content_items WHERE id = ?", (content_id,)).fetchone()
+            if item is None:
+                raise ValueError("missing")
+            if item["type"] != "training":
+                raise ValueError("invalid_task")
+            if item["revision"] != revision:
+                raise ValueError("conflict")
+            payload = json.loads(item["payload_json"])
+            if payload.get("scriptStatus") != "confirmed" or not isinstance(payload.get("script"), dict):
+                raise ValueError("script_not_confirmed")
+            questions = payload["script"].get("questions")
+            if not isinstance(questions, list) or len(questions) != 3 or len(answers) != 3 or any(not answer for answer in answers):
+                raise ValueError("answers_incomplete")
+            results: list[dict[str, Any]] = []
+            score = 0
+            for index, (question, answer) in enumerate(zip(questions, answers)):
+                if not isinstance(question, dict) or answer not in question.get("options", []):
+                    raise ValueError("answers_invalid")
+                correct = answer == question.get("answer")
+                score += int(correct)
+                results.append({
+                    "index": index,
+                    "question": question.get("question", ""),
+                    "selected": answer,
+                    "correctAnswer": question.get("answer", ""),
+                    "correct": correct,
+                    "explanation": question.get("explanation", ""),
+                })
+            answer_map = {str(index): answer for index, answer in enumerate(answers)}
+            connection.execute(
+                """INSERT INTO training_sessions
+                   (content_id, answers_json, last_score, results_json, attempt, status, updated_at)
+                   VALUES (?, ?, ?, ?, 1, 'completed', ?)
+                   ON CONFLICT(content_id) DO UPDATE SET answers_json = excluded.answers_json,
+                   last_score = excluded.last_score, results_json = excluded.results_json,
+                   attempt = training_sessions.attempt + 1, status = 'completed', updated_at = excluded.updated_at""",
+                (content_id, json.dumps(answer_map, ensure_ascii=False), score, json.dumps(results, ensure_ascii=False), timestamp),
+            )
+            Database._audit(connection, actor_id, "training.quiz.submit", "content", content_id, f"提交培训测试：{score}/3")
+        result = self.get_item(content_id)
+        assert result is not None
+        return result
+
+    def reset_training_quiz(self, actor_id: str, content_id: str, revision: int) -> dict[str, Any]:
+        timestamp = now_iso()
+        with self.database.connect() as connection:
+            item = connection.execute("SELECT * FROM content_items WHERE id = ?", (content_id,)).fetchone()
+            if item is None:
+                raise ValueError("missing")
+            if item["type"] != "training":
+                raise ValueError("invalid_task")
+            if item["revision"] != revision:
+                raise ValueError("conflict")
+            payload = json.loads(item["payload_json"])
+            if payload.get("scriptStatus") != "confirmed":
+                raise ValueError("script_not_confirmed")
+            connection.execute(
+                """INSERT INTO training_sessions (content_id, status, updated_at)
+                   VALUES (?, 'ready', ?)
+                   ON CONFLICT(content_id) DO UPDATE SET answers_json = '{}', last_score = NULL,
+                   results_json = '[]', status = 'ready', updated_at = excluded.updated_at""",
+                (content_id, timestamp),
+            )
+            Database._audit(connection, actor_id, "training.quiz.reset", "content", content_id, "重新开始培训测试")
         result = self.get_item(content_id)
         assert result is not None
         return result
@@ -817,3 +1000,31 @@ class ContentRepository:
     @staticmethod
     def _job(row: Any) -> dict[str, Any]:
         return {"id": row["id"], "contentId": row["content_id"], "branchId": row["branch_id"], "taskType": row["task_type"], "status": row["status"], "input": json.loads(row["input_json"]), "output": json.loads(row["output_json"]), "error": row["public_error"], "errorCode": row["error_code"], "attempt": row["attempt"], "provider": row["provider"], "model": row["model"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
+
+    @staticmethod
+    def _training_session(row: Any, fallback_status: str = "locked") -> dict[str, Any]:
+        if row is None:
+            return {
+                "chapterIndex": 0,
+                "sentenceIndex": 0,
+                "playbackRate": 1.0,
+                "mode": "voice",
+                "answers": {},
+                "lastScore": None,
+                "results": [],
+                "attempt": 0,
+                "status": fallback_status,
+                "updatedAt": "",
+            }
+        return {
+            "chapterIndex": row["chapter_index"],
+            "sentenceIndex": row["sentence_index"],
+            "playbackRate": row["playback_rate"],
+            "mode": row["mode"],
+            "answers": json.loads(row["answers_json"]),
+            "lastScore": row["last_score"],
+            "results": json.loads(row["results_json"]),
+            "attempt": row["attempt"],
+            "status": row["status"],
+            "updatedAt": row["updated_at"],
+        }

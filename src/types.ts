@@ -126,9 +126,32 @@ export interface ContentItem {
   manualSource: string;
   settings: Record<string, unknown>;
   payload: Record<string, any>;
+  trainingSession?: TrainingSession;
   branches: ContentBranch[];
   jobs: GenerationJob[];
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface TrainingQuizResult {
+  index: number;
+  question: string;
+  selected: string;
+  correctAnswer: string;
+  correct: boolean;
+  explanation: string;
+}
+
+export interface TrainingSession {
+  chapterIndex: number;
+  sentenceIndex: number;
+  playbackRate: number;
+  mode: "voice" | "silent";
+  answers: Record<string, string>;
+  lastScore: number | null;
+  results: TrainingQuizResult[];
+  attempt: number;
+  status: "locked" | "ready" | "completed" | "stale";
   updatedAt: string;
 }
 
