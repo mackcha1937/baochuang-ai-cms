@@ -182,6 +182,26 @@ export interface ReviewTask {
   records?: ReviewRecord[];
 }
 
+export interface AssetSummary {
+  id: string;
+  contentVersionId: string;
+  contentId: string;
+  branchId: string | null;
+  contentVersion: number;
+  type: ContentType;
+  channel: "wechat" | "xiaohongshu" | null;
+  title: string;
+  status: "approved";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AssetDetail extends AssetSummary {
+  snapshot: Record<string, any>;
+  submittedBy: string;
+  submittedAt: string;
+}
+
 export interface TrainingQuizResult {
   index: number;
   question: string;

@@ -229,6 +229,16 @@ class ReviewRepository:
                 else:
                     target_status = "approved" if decision == "approve" else f"rejected_{task['stage']}"
                     self._set_content_review_status(connection, task, target_status, timestamp)
+                    if decision == "approve" and task["stage"] == "compliance":
+                        item = connection.execute("SELECT type, title FROM content_items WHERE id = ?", (task["content_id"],)).fetchone()
+                        branch = connection.execute("SELECT channel FROM content_branches WHERE id = ?", (task["branch_id"],)).fetchone() if task["branch_id"] else None
+                        connection.execute(
+                            """INSERT OR IGNORE INTO assets
+                               (id, content_version_id, content_id, branch_id, type, channel, title, status, created_at, updated_at)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?)""",
+                            (task["content_version_id"], task["content_version_id"], task["content_id"], task["branch_id"], item["type"], branch["channel"] if branch else None, item["title"], timestamp, timestamp),
+                        )
+                        Database._audit(connection, actor_id, "asset.create", "asset", task["content_version_id"], "合规批准后创建不可变素材")
                     result_task_id = task_id
                 connection.execute(
                     "INSERT INTO idempotency_keys VALUES (?, ?, ?, ?, ?)",

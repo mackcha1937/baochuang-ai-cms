@@ -97,6 +97,13 @@ CREATE TABLE IF NOT EXISTS review_records (
     actor_id TEXT NOT NULL, decision TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS assets (
+    id TEXT PRIMARY KEY, content_version_id TEXT NOT NULL UNIQUE REFERENCES content_versions(id) ON DELETE RESTRICT,
+    content_id TEXT NOT NULL REFERENCES content_items(id) ON DELETE RESTRICT,
+    branch_id TEXT REFERENCES content_branches(id) ON DELETE RESTRICT,
+    type TEXT NOT NULL, channel TEXT, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'approved',
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_products_updated ON products(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_source_documents_product ON source_documents(product_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_time ON audit_logs(occurred_at DESC);
@@ -107,6 +114,7 @@ CREATE INDEX IF NOT EXISTS idx_training_sessions_updated ON training_sessions(up
 CREATE INDEX IF NOT EXISTS idx_content_versions_content ON content_versions(content_id, version_no DESC);
 CREATE INDEX IF NOT EXISTS idx_review_tasks_status ON review_tasks(status, stage, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_review_records_task ON review_records(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_assets_filter ON assets(status, type, channel, updated_at DESC);
 """
 
 DEFAULT_FACTS = ["投保年龄", "保障期间", "等待期", "缴费期间"]
@@ -142,6 +150,7 @@ class Database:
             self._migrate_stage01(connection)
             self._migrate_stage04(connection)
             self._migrate_stage06(connection)
+            self._migrate_stage07(connection)
             self._seed(connection)
 
     @staticmethod
@@ -179,6 +188,20 @@ class Database:
         branch_columns = {row[1] for row in connection.execute("PRAGMA table_info(content_branches)")}
         if "review_status" not in branch_columns:
             connection.execute("ALTER TABLE content_branches ADD COLUMN review_status TEXT NOT NULL DEFAULT 'draft'")
+
+    @staticmethod
+    def _migrate_stage07(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """INSERT OR IGNORE INTO assets
+               (id, content_version_id, content_id, branch_id, type, channel, title, status, created_at, updated_at)
+               SELECT version.id, version.id, task.content_id, task.branch_id, item.type, branch.channel,
+                      item.title, 'approved', COALESCE(task.completed_at, task.updated_at), task.updated_at
+               FROM review_tasks task
+               JOIN content_versions version ON version.id = task.content_version_id
+               JOIN content_items item ON item.id = task.content_id
+               LEFT JOIN content_branches branch ON branch.id = task.branch_id
+               WHERE task.stage = 'compliance' AND task.status = 'approved'"""
+        )
 
     @staticmethod
     def _seed(connection: sqlite3.Connection) -> None:
@@ -369,7 +392,8 @@ class Database:
         with self.connect() as connection:
             product_count = connection.execute("SELECT COUNT(*) FROM products").fetchone()[0]
             pending_reviews = connection.execute("SELECT COUNT(*) FROM review_tasks WHERE status IN ('pending', 'in_progress')").fetchone()[0]
-        return {"products": product_count, "pendingReviews": pending_reviews, "approvedAssets": 0, "possiblyOutdated": 0}
+            approved_assets = connection.execute("SELECT COUNT(*) FROM assets WHERE status = 'approved'").fetchone()[0]
+        return {"products": product_count, "pendingReviews": pending_reviews, "approvedAssets": approved_assets, "possiblyOutdated": 0}
 
     def get_recent_audit(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as connection: rows = connection.execute("SELECT * FROM audit_logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()

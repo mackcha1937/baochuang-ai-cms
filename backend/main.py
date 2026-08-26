@@ -8,6 +8,7 @@ import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Optional, Union
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, Query, Request, UploadFile
@@ -17,6 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from backend.config import Settings
 from backend.ai_content import AIProvider, ContentRepository, DeepSeekProvider
+from backend.assets import AssetRepository
 from backend.database import Database
 from backend.document_parser import EmptyDocumentError, parse_document
 from backend.image_generation import ImageProvider, QwenImageProvider, validate_raster
@@ -216,6 +218,7 @@ def create_app(
     visual_provider = image_provider or QwenImageProvider(max_download_bytes=active_settings.max_visual_bytes)
     upload_root = active_settings.upload_dir
     generated_root = active_settings.generated_dir
+    asset_repository = AssetRepository(database, generated_root)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -810,6 +813,63 @@ def create_app(
             raise ApiError(404, "VISUAL_FILE_MISSING", "视觉文件缺失，可重新生成或上传替换图")
         return FileResponse(path, media_type=asset["mime_type"], headers={"Cache-Control": "private, max-age=60", "X-Content-Type-Options": "nosniff"})
 
+    @app.get("/api/v1/assets")
+    def list_assets(
+        type: str = Query(default="", max_length=20),
+        status: str = Query(default="", max_length=20),
+        channel: str = Query(default="", max_length=20),
+        _: dict[str, Any] = Depends(require("asset.view")),
+    ) -> dict[str, Any]:
+        if type and type not in {"image", "article", "training"}:
+            raise ApiError(422, "ASSET_TYPE_INVALID", "素材类型无效")
+        if status and status not in {"approved"}:
+            raise ApiError(422, "ASSET_STATUS_INVALID", "素材状态无效")
+        if channel and channel not in {"wechat", "xiaohongshu"}:
+            raise ApiError(422, "ASSET_CHANNEL_INVALID", "素材渠道无效")
+        items = asset_repository.list_assets(asset_type=type, status=status, channel=channel)
+        return {"items": items, "total": len(items)}
+
+    @app.get("/api/v1/assets/{asset_id}")
+    def get_asset(asset_id: str, _: dict[str, Any] = Depends(require("asset.view"))) -> dict[str, Any]:
+        asset = asset_repository.get_asset(asset_id)
+        if asset is None:
+            raise ApiError(404, "ASSET_NOT_FOUND", "批准素材不存在")
+        return asset
+
+    @app.post("/api/v1/assets/{asset_id}/duplicate", status_code=201)
+    def duplicate_asset(asset_id: str, user: dict[str, Any] = Depends(require("asset.duplicate"))) -> dict[str, Any]:
+        try:
+            content_id = asset_repository.duplicate(user["id"], asset_id)
+        except ValueError as exc:
+            raise ApiError(404, "ASSET_NOT_FOUND", "批准素材不存在或当前不可复制") from exc
+        item = content_repository.get_item(content_id)
+        assert item is not None
+        return item
+
+    @app.get("/api/v1/assets/{asset_id}/download", response_model=None)
+    def download_asset(asset_id: str, user: dict[str, Any] = Depends(require("asset.download"))) -> Response:
+        try:
+            data, media_type, filename = asset_repository.download(user["id"], asset_id)
+        except ValueError as exc:
+            code = str(exc)
+            if code == "missing":
+                raise ApiError(404, "ASSET_NOT_FOUND", "批准素材不存在") from exc
+            if code == "status":
+                raise ApiError(409, "ASSET_STATUS_INVALID", "仅批准素材可以下载") from exc
+            if code == "file_missing":
+                raise ApiError(404, "ASSET_FILE_MISSING", "批准图片的源文件缺失") from exc
+            raise ApiError(422, "ASSET_TYPE_INVALID", "素材类型无法生成正式文件") from exc
+        disposition = f"attachment; filename*=UTF-8''{quote(filename, safe='')}"
+        return Response(
+            content=data,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": disposition,
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     @app.get("/api/health", include_in_schema=False)
     def legacy_health() -> dict[str, Any]: return {"ok": True, "service": "baochuang-api", "version": "0.2.0"}
 
@@ -819,7 +879,7 @@ def create_app(
     @app.get("/api/state", include_in_schema=False)
     def legacy_state() -> dict[str, Any]:
         products = [database.get_product(item["id"]) for item in database.list_products()]
-        return {"brand": database.get_brand(), "products": [item for item in products if item], "contents": [], "reviews": [], "assets": [], "audit": database.get_recent_audit(), "settings": {"demoMode": True, "permissions": database.get_demo_user()["permissions"]}}
+        return {"brand": database.get_brand(), "products": [item for item in products if item], "contents": [], "reviews": [], "assets": asset_repository.list_assets(), "audit": database.get_recent_audit(), "settings": {"demoMode": True, "permissions": database.get_demo_user()["permissions"]}}
 
     @app.get("/api/v1/{path:path}")
     def api_not_found(path: str) -> None: raise ApiError(404, "API_NOT_FOUND", f"接口 /api/v1/{path} 不存在")
