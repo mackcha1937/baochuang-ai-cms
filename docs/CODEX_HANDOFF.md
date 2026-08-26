@@ -5,8 +5,8 @@
 - 项目根目录：`/Users/zzymima0000/Desktop/个人项目-cms`
 - 当前分支：`stage/01-foundation`
 - Stage 00：已验收并保留在`stage/00-preparation`
-- Stage 01：代码与全量自检已通过，验收证据见`reports/qa/stage-01.md`
-- 下一步：提交Stage 01；等待用户确认后再创建Stage 02分支
+- Stage 01：代码与全量自检已通过，代码提交为`dd81667`，验收证据见`reports/qa/stage-01.md`
+- 下一步：等待用户确认后再创建Stage 02分支
 
 ## Stage 01已交付
 
