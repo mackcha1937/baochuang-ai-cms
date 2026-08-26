@@ -2,6 +2,8 @@
 data/uploads/*
 !data/uploads/.gitkeep
 data/state.json
+data/*.db
+data/*.db-*
 __pycache__/
 *.pyc
 .DS_Store
@@ -11,6 +13,9 @@ outputs/
 node_modules/
 dist/
 coverage/
+.vite/
+playwright-report/
+test-results/
 .pytest_cache/
 .cache/
 /*.docx

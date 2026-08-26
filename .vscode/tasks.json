@@ -2,28 +2,22 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "自检：Python语法",
+      "label": "安装：Stage 01依赖",
       "type": "shell",
-      "command": "python3",
-      "args": ["-m", "py_compile", "server.py"],
-      "options": {
-        "env": {
-          "PYTHONPYCACHEPREFIX": "${workspaceFolder}/.cache/pyc"
-        }
-      },
+      "command": "python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt && npm install",
+      "problemMatcher": []
+    },
+    {
+      "label": "自检：Stage 01全量",
+      "type": "shell",
+      "command": "npm run check",
       "group": "test",
       "problemMatcher": []
     },
     {
-      "label": "运行：本地服务",
+      "label": "运行：Stage 01本地演示",
       "type": "shell",
-      "command": "python3",
-      "args": ["server.py"],
-      "options": {
-        "env": {
-          "PYTHONPYCACHEPREFIX": "${workspaceFolder}/.cache/pyc"
-        }
-      },
+      "command": "npm run demo",
       "isBackground": true,
       "problemMatcher": []
     }
