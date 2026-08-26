@@ -1,6 +1,6 @@
 # 保创AI
 
-保险中介 AI 内容智能平台的 PC 端本地演示项目。当前代码完成到 **Stage 01：项目基础骨架**，提供 React/Vite/TypeScript 应用壳、FastAPI/SQLite 基础服务、10 个一级导航入口以及预置达尔文12号产品数据。
+保险中介 AI 内容智能平台的 PC 端本地演示项目。Stage 01—03 已验收；当前位于 **Stage 04：图片生成与确定性排版**，已完成千问异步视觉任务、程序文字排版、结构化图片编辑、失败恢复、安全存储和自动化/浏览器无 Key 验收，等待项目负责人配置真实千问凭据后完成供应商联调。
 
 ## 环境要求
 
@@ -16,7 +16,7 @@ python3 -m venv .venv
 npm install
 ```
 
-真实密钥只能由项目负责人本人写入本地 `.env`。Stage 01 不需要任何 API Key，也不会发起外部 AI 请求。
+真实密钥只能由项目负责人本人写入本地 `.env`，不得提交或分享。DeepSeek 使用 `DEEPSEEK_API_KEY`；千问图片使用 `DASHSCOPE_API_KEY`。推荐同时填写与 Key 同地域的 `DASHSCOPE_WORKSPACE_ID` 和 `DASHSCOPE_REGION`，模型默认 `qwen-image-3.0`。
 
 ## 启动
 
@@ -48,11 +48,14 @@ npm run check
 bash tests/smoke.sh
 ```
 
-完整的阶段检查清单、失败修复和验收结论记录在 `reports/qa/stage-01.md`。
+完整的阶段检查清单、失败修复和验收结论记录在 `reports/qa/stage-NN.md`。
 
 ## 配置与部署替换点
 
 - `APP_DATABASE_URL`：当前为 SQLite，后续可由数据访问层替换 PostgreSQL。
-- `data/uploads/`：当前本地目录，后续替换火山引擎 TOS。
-- AI 服务：后续通过后端适配层接入；Key 永远不进入前端。
-- 后台任务、缓存、HTTPS、日志监控：均保留到对应后续阶段实施，不在 Stage 01 越界实现。
+- `APP_UPLOAD_DIR`：产品源文件本地目录；`APP_GENERATED_DIR`：视觉素材本地目录，后续统一替换火山引擎 TOS。
+- `APP_MAX_VISUAL_BYTES`：视觉素材下载/上传安全上限，默认 15 MB。
+- `DASHSCOPE_REGION`：`beijing`、`singapore`、`frankfurt` 或 `tokyo`；Key、Workspace、Endpoint 和模型必须同地域。
+- `DASHSCOPE_API_BASE_URL`：可选自定义 API 基地址；为空时根据 Workspace/地域解析，未填 Workspace 时使用仍可用的旧地域域名。
+- AI 服务通过后端适配层接入；Key 永远不进入前端、响应、数据库业务载荷或 Git。
+- 独立任务队列、缓存、HTTPS 和日志监控保留到对应后续阶段实施；当前本地演示使用持久化任务表与进程内执行器。

@@ -67,3 +67,9 @@ export function uploadProductFile(productId: string, file: File): { promise: Pro
     cancel: () => controller.abort(),
   };
 }
+
+export function uploadVisualFile(contentId: string, revision: number, file: File): Promise<unknown> {
+  const form = new FormData();
+  form.append("file", file);
+  return apiRequest(`/contents/${encodeURIComponent(contentId)}/visual-assets?revision=${revision}`, { method: "POST", body: form }, 120_000);
+}

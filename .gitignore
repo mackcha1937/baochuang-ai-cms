@@ -1,6 +1,8 @@
 .env
 data/uploads/*
 !data/uploads/.gitkeep
+data/generated/*
+!data/generated/.gitkeep
 data/state.json
 data/*.db
 data/*.db-*

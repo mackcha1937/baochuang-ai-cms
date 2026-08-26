@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import hashlib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional, Protocol
 from uuid import uuid4
 
 import httpx
 
 from backend.database import Database, now_iso
+from backend.image_generation import ImageProvider, VisualCancelled, VisualProviderError, VisualResult
 
 
 TASK_REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
@@ -21,7 +24,7 @@ TASK_REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
 }
 
 CONTENT_TASKS: dict[str, set[str]] = {
-    "image": {"image_copy"},
+    "image": {"image_copy", "image_visual"},
     "article": {"article_outline", "article_generate"},
     "training": {"training_outline", "training_script"},
 }
@@ -396,6 +399,266 @@ class ContentRepository:
         assert job is not None
         return job
 
+    def run_visual_job(self, actor_id: str, job_id: str, provider: ImageProvider, visual_root: Path) -> dict[str, Any]:
+        with self.database.connect() as connection:
+            row = connection.execute("SELECT * FROM generation_jobs WHERE id = ?", (job_id,)).fetchone()
+            if row is None:
+                raise ValueError("missing")
+            if row["task_type"] != "image_visual":
+                raise ValueError("invalid_task")
+            if row["status"] not in {"queued", "failed", "cancelled"}:
+                raise ValueError("state")
+            item = connection.execute("SELECT * FROM content_items WHERE id = ?", (row["content_id"],)).fetchone()
+            self._ensure_task_unlocked(item, None, row["task_type"])
+            connection.execute(
+                """UPDATE generation_jobs SET status = 'running', public_error = '', error_code = '',
+                   attempt = attempt + 1, provider = ?, model = ?, provider_task_id = '',
+                   cancel_requested = 0, updated_at = ? WHERE id = ?""",
+                (provider.name, provider.model, now_iso(), job_id),
+            )
+            Database._audit(connection, actor_id, "generation.start", "job", job_id, "开始 image_visual 任务")
+            snapshot = json.loads(row["input_json"])
+
+        def save_provider_task_id(provider_task_id: str) -> None:
+            safe_id = provider_task_id.strip()[:200]
+            with self.database.connect() as connection:
+                connection.execute(
+                    "UPDATE generation_jobs SET provider_task_id = ?, updated_at = ? WHERE id = ?",
+                    (safe_id, now_iso(), job_id),
+                )
+
+        def is_cancelled() -> bool:
+            with self.database.connect() as connection:
+                current = connection.execute("SELECT cancel_requested FROM generation_jobs WHERE id = ?", (job_id,)).fetchone()
+            return current is None or bool(current["cancel_requested"])
+
+        try:
+            result = provider.generate(snapshot, on_task_created=save_provider_task_id, is_cancelled=is_cancelled)
+            if is_cancelled():
+                raise VisualCancelled()
+            self._save_visual_result(actor_id, row["content_id"], job_id, snapshot, result, visual_root)
+        except VisualCancelled:
+            with self.database.connect() as connection:
+                connection.execute(
+                    "UPDATE generation_jobs SET status = 'cancelled', output_json = '{}', updated_at = ? WHERE id = ?",
+                    (now_iso(), job_id),
+                )
+                Database._audit(connection, actor_id, "generation.cancelled_late", "job", job_id, "取消视觉任务并隔离迟到结果")
+        except VisualProviderError as exc:
+            with self.database.connect() as connection:
+                current = connection.execute("SELECT cancel_requested FROM generation_jobs WHERE id = ?", (job_id,)).fetchone()
+                if current and current["cancel_requested"]:
+                    connection.execute("UPDATE generation_jobs SET status = 'cancelled', updated_at = ? WHERE id = ?", (now_iso(), job_id))
+                else:
+                    connection.execute(
+                        "UPDATE generation_jobs SET status = 'failed', error_code = ?, public_error = ?, updated_at = ? WHERE id = ?",
+                        (exc.code, exc.message, now_iso(), job_id),
+                    )
+                    Database._audit(connection, actor_id, "generation.failed", "job", job_id, f"image_visual 失败：{exc.code}")
+        except (OSError, ValueError, TypeError):
+            with self.database.connect() as connection:
+                connection.execute(
+                    """UPDATE generation_jobs SET status = 'failed', error_code = 'VISUAL_STORAGE_FAILED',
+                       public_error = '视觉素材校验或保存失败，输入已保留，可重试', updated_at = ? WHERE id = ?""",
+                    (now_iso(), job_id),
+                )
+                Database._audit(connection, actor_id, "generation.failed", "job", job_id, "image_visual 失败：VISUAL_STORAGE_FAILED")
+        job = self.get_job(job_id)
+        assert job is not None
+        return job
+
+    def _save_visual_result(
+        self,
+        actor_id: str,
+        content_id: str,
+        job_id: str,
+        snapshot: dict[str, Any],
+        result: VisualResult,
+        visual_root: Path,
+    ) -> None:
+        asset_id, storage_key = uuid4().hex, f"{uuid4().hex}.png"
+        path = self._visual_path(visual_root, storage_key)
+        visual_root.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(result.data)
+        checksum = hashlib.sha256(result.data).hexdigest()
+        timestamp = now_iso()
+        try:
+            with self.database.connect() as connection:
+                current = connection.execute("SELECT cancel_requested FROM generation_jobs WHERE id = ?", (job_id,)).fetchone()
+                if current is None or current["cancel_requested"]:
+                    raise VisualCancelled()
+                connection.execute(
+                    """INSERT INTO visual_assets
+                       (id, content_id, job_id, source, storage_key, mime_type, size_bytes, checksum, width, height, created_at)
+                       VALUES (?, ?, ?, 'qwen', ?, ?, ?, ?, ?, ?, ?)""",
+                    (asset_id, content_id, job_id, storage_key, result.mime_type, len(result.data), checksum, result.width, result.height, timestamp),
+                )
+                item = connection.execute("SELECT payload_json FROM content_items WHERE id = ?", (content_id,)).fetchone()
+                payload = json.loads(item["payload_json"])
+                layout = self._default_layout(connection, snapshot, asset_id)
+                payload["visual"] = {"assetId": asset_id, "status": "draft", "layout": layout}
+                connection.execute(
+                    "UPDATE content_items SET payload_json = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                    (json.dumps(payload, ensure_ascii=False), timestamp, content_id),
+                )
+                output = {
+                    "assetId": asset_id,
+                    "previewUrl": f"/api/v1/visual-assets/{asset_id}/preview",
+                    "width": result.width,
+                    "height": result.height,
+                    "checksum": checksum,
+                }
+                connection.execute(
+                    "UPDATE generation_jobs SET status = 'succeeded', output_json = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(output, ensure_ascii=False), timestamp, job_id),
+                )
+                Database._audit(connection, actor_id, "generation.success", "job", job_id, "完成 image_visual 任务并保存视觉素材")
+        except Exception:
+            if path.exists():
+                path.unlink()
+            raise
+
+    def save_uploaded_visual(
+        self,
+        actor_id: str,
+        content_id: str,
+        revision: int,
+        original_name: str,
+        data: bytes,
+        mime_type: str,
+        extension: str,
+        width: int,
+        height: int,
+        visual_root: Path,
+    ) -> dict[str, Any]:
+        asset_id, storage_key = uuid4().hex, f"{uuid4().hex}{extension}"
+        path = self._visual_path(visual_root, storage_key)
+        visual_root.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        checksum, timestamp = hashlib.sha256(data).hexdigest(), now_iso()
+        try:
+            with self.database.connect() as connection:
+                item = connection.execute("SELECT * FROM content_items WHERE id = ?", (content_id,)).fetchone()
+                if item is None:
+                    raise ValueError("missing")
+                if item["type"] != "image":
+                    raise ValueError("invalid_task")
+                if item["revision"] != revision:
+                    raise ValueError("conflict")
+                payload = json.loads(item["payload_json"])
+                if payload.get("copyStatus") != "confirmed":
+                    raise ValueError("copy_not_confirmed")
+                connection.execute(
+                    """INSERT INTO visual_assets
+                       (id, content_id, source, original_name, storage_key, mime_type, size_bytes, checksum, width, height, created_at)
+                       VALUES (?, ?, 'upload', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (asset_id, content_id, original_name, storage_key, mime_type, len(data), checksum, width, height, timestamp),
+                )
+                snapshot = self._snapshot(connection, item, "image_visual", None, "人工替换视觉素材")
+                layout = self._default_layout(connection, snapshot, asset_id)
+                payload["visual"] = {"assetId": asset_id, "status": "draft", "layout": layout}
+                connection.execute(
+                    "UPDATE content_items SET payload_json = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                    (json.dumps(payload, ensure_ascii=False), timestamp, content_id),
+                )
+                Database._audit(connection, actor_id, "visual.upload", "content", content_id, f"上传替换图 {original_name}")
+        except Exception:
+            if path.exists():
+                path.unlink()
+            raise
+        result = self.get_item(content_id)
+        assert result is not None
+        return result
+
+    def update_visual_layout(
+        self,
+        actor_id: str,
+        content_id: str,
+        revision: int,
+        template: str,
+        palette: str,
+        block_order: list[str],
+        hidden_block_ids: list[str],
+    ) -> dict[str, Any]:
+        with self.database.connect() as connection:
+            item = connection.execute("SELECT * FROM content_items WHERE id = ?", (content_id,)).fetchone()
+            if item is None:
+                raise ValueError("missing")
+            if item["type"] != "image":
+                raise ValueError("invalid_task")
+            if item["revision"] != revision:
+                raise ValueError("conflict")
+            payload = json.loads(item["payload_json"])
+            visual = payload.get("visual")
+            if not isinstance(visual, dict) or not isinstance(visual.get("layout"), dict):
+                raise ValueError("visual_missing")
+            layout = visual["layout"]
+            blocks = layout.get("blocks") if isinstance(layout.get("blocks"), list) else []
+            block_ids = [str(block.get("id")) for block in blocks if isinstance(block, dict)]
+            if len(block_ids) != len(set(block_ids)) or len(block_order) != len(set(block_order)) or set(block_order) != set(block_ids):
+                raise ValueError("layout_invalid")
+            if not set(hidden_block_ids).issubset(set(block_ids)):
+                raise ValueError("layout_invalid")
+            required = {str(block.get("id")) for block in blocks if isinstance(block, dict) and block.get("required")}
+            if required.intersection(hidden_block_ids):
+                raise ValueError("required_block")
+            layout.update({"template": template, "palette": palette, "blockOrder": block_order, "hiddenBlockIds": hidden_block_ids})
+            visual["layout"] = layout
+            visual["status"] = "draft"
+            timestamp = now_iso()
+            connection.execute(
+                "UPDATE content_items SET payload_json = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                (json.dumps(payload, ensure_ascii=False), timestamp, content_id),
+            )
+            Database._audit(connection, actor_id, "visual.layout.update", "content", content_id, "更新图片模板、配色与区块结构")
+        result = self.get_item(content_id)
+        assert result is not None
+        return result
+
+    def get_visual_asset(self, asset_id: str) -> Optional[dict[str, Any]]:
+        with self.database.connect() as connection:
+            row = connection.execute("SELECT * FROM visual_assets WHERE id = ? AND status = 'ready'", (asset_id,)).fetchone()
+        return dict(row) if row else None
+
+    @staticmethod
+    def _visual_path(visual_root: Path, storage_key: str) -> Path:
+        root = visual_root.resolve()
+        candidate = (root / storage_key).resolve()
+        if not candidate.is_relative_to(root) or candidate.name != storage_key:
+            raise ValueError("unsafe visual path")
+        return candidate
+
+    @staticmethod
+    def _default_layout(connection: Any, snapshot: dict[str, Any], asset_id: str) -> dict[str, Any]:
+        copy = snapshot.get("confirmedCopy") if isinstance(snapshot.get("confirmedCopy"), dict) else {}
+        settings = snapshot.get("settings") if isinstance(snapshot.get("settings"), dict) else {}
+        product = snapshot.get("product") if isinstance(snapshot.get("product"), dict) else {}
+        brand = connection.execute("SELECT primary_color, secondary_color FROM brands LIMIT 1").fetchone()
+        image_type = str(settings.get("imageType", "长图"))
+        template = {"营销海报": "square-focus", "公众号头图": "header-split"}.get(image_type, "long-editorial")
+        blocks: list[dict[str, Any]] = [
+            {"id": "title", "type": "title", "text": str(copy.get("title", "")), "required": True},
+            {"id": "product", "type": "product", "text": str(product.get("name", "产品保障方案")), "required": True},
+        ]
+        selling_points = copy.get("sellingPoints") if isinstance(copy.get("sellingPoints"), list) else []
+        for index, value in enumerate(selling_points[:6]):
+            blocks.append({"id": f"selling-{index + 1}", "type": "selling", "text": str(value), "required": False})
+        copy_blocks = copy.get("blocks") if isinstance(copy.get("blocks"), list) else []
+        for index, value in enumerate(copy_blocks[:8]):
+            if isinstance(value, dict):
+                blocks.append({"id": f"copy-{index + 1}", "type": str(value.get("type", "copy")), "text": str(value.get("text", "")), "required": False})
+        blocks.append({"id": "disclaimer", "type": "disclaimer", "text": str(copy.get("disclaimer", "具体责任以保险合同为准。")), "required": True})
+        return {
+            "assetId": asset_id,
+            "imageType": image_type,
+            "template": template,
+            "palette": "brand",
+            "brandColors": {"primary": brand["primary_color"], "secondary": brand["secondary_color"]} if brand else {"primary": "#6d5dfc", "secondary": "#2ac7b8"},
+            "blocks": blocks,
+            "blockOrder": [block["id"] for block in blocks],
+            "hiddenBlockIds": [],
+        }
+
     def cancel_job(self, actor_id: str, job_id: str) -> Optional[dict[str, Any]]:
         with self.database.connect() as connection:
             row = connection.execute("SELECT status FROM generation_jobs WHERE id = ?", (job_id,)).fetchone()
@@ -437,6 +700,31 @@ class ContentRepository:
         assert result is not None
         return result
 
+    def unlock_image_copy(self, actor_id: str, content_id: str, revision: int) -> dict[str, Any]:
+        timestamp = now_iso()
+        with self.database.connect() as connection:
+            item = connection.execute("SELECT * FROM content_items WHERE id = ?", (content_id,)).fetchone()
+            if item is None:
+                raise ValueError("missing")
+            if item["type"] != "image":
+                raise ValueError("invalid_task")
+            if item["revision"] != revision:
+                raise ValueError("conflict")
+            payload = json.loads(item["payload_json"])
+            if payload.get("copyStatus") != "confirmed":
+                raise ValueError("state")
+            payload["copyStatus"] = "draft"
+            if isinstance(payload.get("visual"), dict):
+                payload["visual"]["status"] = "needs_relayout"
+            connection.execute(
+                "UPDATE content_items SET payload_json = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                (json.dumps(payload, ensure_ascii=False), timestamp, content_id),
+            )
+            Database._audit(connection, actor_id, "content.unlock.copy", "content", content_id, "解锁图片文案并标记既有视觉需重新排版")
+        result = self.get_item(content_id)
+        assert result is not None
+        return result
+
     def save_manual_output(self, actor_id: str, content_id: str, task_type: str, branch_id: Optional[str], revision: int, output: dict[str, Any]) -> dict[str, Any]:
         validate_output(task_type, output)
         with self.database.connect() as connection:
@@ -471,6 +759,10 @@ class ContentRepository:
         snapshot: dict[str, Any] = {"taskType": task_type, "product": product, "manualSource": item["manual_source"], "settings": json.loads(item["settings_json"]), "instruction": instruction}
         payload = json.loads(item["payload_json"])
         if task_type == "image_copy" and payload.get("copy"): snapshot["currentCopy"] = payload["copy"]
+        if task_type == "image_visual":
+            if payload.get("copyStatus") != "confirmed" or not isinstance(payload.get("copy"), dict):
+                raise ValueError("copy_not_confirmed")
+            snapshot["confirmedCopy"] = payload["copy"]
         if branch:
             snapshot["channel"] = branch["channel"]
             if task_type == "article_generate":
@@ -483,6 +775,14 @@ class ContentRepository:
 
     @staticmethod
     def _ensure_task_unlocked(item: Any, branch: Any, task_type: str) -> None:
+        if task_type == "image_copy":
+            payload = json.loads(item["payload_json"])
+            if payload.get("copyStatus") == "confirmed":
+                raise ValueError("node_locked")
+        if task_type == "image_visual":
+            payload = json.loads(item["payload_json"])
+            if payload.get("copyStatus") != "confirmed" or not payload.get("copy"):
+                raise ValueError("copy_not_confirmed")
         if task_type == "article_outline" and branch and branch["outline_status"] == "confirmed":
             raise ValueError("node_locked")
         if task_type in {"training_outline", "training_script"}:

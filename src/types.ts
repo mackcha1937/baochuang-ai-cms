@@ -131,3 +131,27 @@ export interface ContentItem {
   createdAt: string;
   updatedAt: string;
 }
+
+export interface VisualBlock {
+  id: string;
+  type: string;
+  text: string;
+  required: boolean;
+}
+
+export interface VisualLayout {
+  assetId: string;
+  imageType: string;
+  template: "long-editorial" | "square-focus" | "header-split";
+  palette: "brand" | "ocean" | "forest" | "sunset";
+  brandColors: { primary: string; secondary: string };
+  blocks: VisualBlock[];
+  blockOrder: string[];
+  hiddenBlockIds: string[];
+}
+
+export interface VisualDraft {
+  assetId: string;
+  status: "draft" | "needs_relayout";
+  layout: VisualLayout;
+}

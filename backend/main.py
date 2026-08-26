@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Optional, Union
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, Header, Query, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
@@ -19,6 +19,7 @@ from backend.config import Settings
 from backend.ai_content import AIProvider, ContentRepository, DeepSeekProvider
 from backend.database import Database
 from backend.document_parser import EmptyDocumentError, parse_document
+from backend.image_generation import ImageProvider, QwenImageProvider, validate_raster
 
 
 class ApiError(Exception):
@@ -96,6 +97,28 @@ class ManualOutputRequest(BaseModel):
     output: dict[str, Any]
 
 
+class VisualLayoutRequest(BaseModel):
+    revision: int = Field(ge=1)
+    template: str
+    palette: str
+    blockOrder: list[str] = Field(min_length=3, max_length=30)
+    hiddenBlockIds: list[str] = Field(default_factory=list, max_length=27)
+
+    @field_validator("template")
+    @classmethod
+    def valid_template(cls, value: str) -> str:
+        if value not in {"long-editorial", "square-focus", "header-split"}:
+            raise ValueError("不支持的图片模板")
+        return value
+
+    @field_validator("palette")
+    @classmethod
+    def valid_palette(cls, value: str) -> str:
+        if value not in {"brand", "ocean", "forest", "sunset"}:
+            raise ValueError("不支持的配色")
+        return value
+
+
 ALLOWED_FILES = {
     ".pdf": {"application/pdf", "application/octet-stream"},
     ".docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/octet-stream"},
@@ -139,21 +162,28 @@ def storage_path(upload_root: Path, storage_key: str) -> Path:
     return candidate
 
 
-def create_app(settings: Optional[Settings] = None, ai_provider: Optional[AIProvider] = None) -> FastAPI:
+def create_app(
+    settings: Optional[Settings] = None,
+    ai_provider: Optional[AIProvider] = None,
+    image_provider: Optional[ImageProvider] = None,
+) -> FastAPI:
     active_settings = settings or Settings.from_environment()
     database = Database(active_settings.database_path)
     content_repository = ContentRepository(database)
     provider = ai_provider or DeepSeekProvider()
+    visual_provider = image_provider or QwenImageProvider(max_download_bytes=active_settings.max_visual_bytes)
     upload_root = active_settings.upload_dir
+    generated_root = active_settings.generated_dir
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         database.initialize()
         upload_root.mkdir(parents=True, exist_ok=True)
+        generated_root.mkdir(parents=True, exist_ok=True)
         yield
 
     app = FastAPI(title="保创AI API", version="0.2.0", docs_url="/api/docs" if os.getenv("APP_ENV") != "production" else None, redoc_url=None, lifespan=lifespan)
-    app.state.database, app.state.settings, app.state.ai_provider = database, active_settings, provider
+    app.state.database, app.state.settings, app.state.ai_provider, app.state.image_provider = database, active_settings, provider, visual_provider
 
     @app.exception_handler(ApiError)
     async def api_exception_handler(_: Request, exc: ApiError) -> JSONResponse:
@@ -382,7 +412,7 @@ def create_app(settings: Optional[Settings] = None, ai_provider: Optional[AIProv
 
     @app.post("/api/v1/contents/{content_id}/jobs", status_code=201)
     def create_generation_job(content_id: str, payload: JobCreateRequest, request: Request, user: dict[str, Any] = Depends(require("content.edit"))) -> JSONResponse:
-        if payload.taskType not in {"image_copy", "article_outline", "article_generate", "training_outline", "training_script"}:
+        if payload.taskType not in {"image_copy", "image_visual", "article_outline", "article_generate", "training_outline", "training_script"}:
             raise ApiError(422, "AI_TASK_UNSUPPORTED", "不支持的生成任务")
         idempotency_key = request.headers.get("Idempotency-Key", "").strip()
         if not idempotency_key or len(idempotency_key) > 100:
@@ -396,10 +426,19 @@ def create_app(settings: Optional[Settings] = None, ai_provider: Optional[AIProv
             if code == "invalid_task": raise ApiError(422, "AI_TASK_UNSUPPORTED", "生成任务与内容类型不匹配") from exc
             if code == "node_locked": raise ApiError(409, "CONTENT_NODE_LOCKED", "节点已确认，不能重新生成") from exc
             if code == "outline_not_confirmed": raise ApiError(422, "OUTLINE_NOT_CONFIRMED", "请先确认框架") from exc
+            if code == "copy_not_confirmed": raise ApiError(422, "IMAGE_COPY_NOT_CONFIRMED", "请先确认图片文案") from exc
             raise
 
     @app.post("/api/v1/jobs/{job_id}/run")
-    def run_generation_job(job_id: str, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
+    def run_generation_job(job_id: str, background_tasks: BackgroundTasks, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
+        existing = content_repository.get_job(job_id)
+        if existing is None:
+            raise ApiError(404, "JOB_NOT_FOUND", "生成任务不存在")
+        if existing["taskType"] == "image_visual":
+            if existing["status"] not in {"queued", "failed", "cancelled"}:
+                raise ApiError(409, "JOB_STATE_CONFLICT", "当前任务状态不能执行")
+            background_tasks.add_task(content_repository.run_visual_job, user["id"], job_id, visual_provider, generated_root)
+            return existing
         try:
             return content_repository.run_job(user["id"], job_id, provider)
         except ValueError as exc:
@@ -408,7 +447,15 @@ def create_app(settings: Optional[Settings] = None, ai_provider: Optional[AIProv
             raise ApiError(409, "JOB_STATE_CONFLICT", "当前任务状态不能执行") from exc
 
     @app.post("/api/v1/jobs/{job_id}/retry")
-    def retry_generation_job(job_id: str, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
+    def retry_generation_job(job_id: str, background_tasks: BackgroundTasks, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
+        existing = content_repository.get_job(job_id)
+        if existing is None:
+            raise ApiError(404, "JOB_NOT_FOUND", "生成任务不存在")
+        if existing["taskType"] == "image_visual":
+            if existing["status"] not in {"failed", "cancelled"}:
+                raise ApiError(409, "JOB_STATE_CONFLICT", "仅失败或已取消任务可重试")
+            background_tasks.add_task(content_repository.run_visual_job, user["id"], job_id, visual_provider, generated_root)
+            return existing
         try:
             return content_repository.run_job(user["id"], job_id, provider)
         except ValueError as exc:
@@ -444,6 +491,17 @@ def create_app(settings: Optional[Settings] = None, ai_provider: Optional[AIProv
             if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "内容已更新，请刷新后重试") from exc
             raise ApiError(422, "CONTENT_NODE_INCOMPLETE", "当前节点没有可确认内容") from exc
 
+    @app.post("/api/v1/contents/{content_id}/unlock-copy")
+    def unlock_image_copy(content_id: str, payload: RevisionRequest, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
+        try:
+            return content_repository.unlock_image_copy(user["id"], content_id, payload.revision)
+        except ValueError as exc:
+            code = str(exc)
+            if code == "missing": raise ApiError(404, "CONTENT_NOT_FOUND", "内容草稿不存在") from exc
+            if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "内容已更新，请刷新后重试") from exc
+            if code == "invalid_task": raise ApiError(422, "CONTENT_TYPE_INVALID", "仅图片项目支持解锁图片文案") from exc
+            raise ApiError(409, "CONTENT_STATE_CONFLICT", "图片文案当前不需要解锁") from exc
+
     @app.put("/api/v1/contents/{content_id}/manual-output")
     def save_manual_output(content_id: str, payload: ManualOutputRequest, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
         if payload.taskType not in {"image_copy", "article_outline", "article_generate", "training_outline", "training_script"}:
@@ -459,11 +517,90 @@ def create_app(settings: Optional[Settings] = None, ai_provider: Optional[AIProv
             if code == "outline_not_confirmed": raise ApiError(422, "OUTLINE_NOT_CONFIRMED", "请先确认框架") from exc
             raise ApiError(422, "MANUAL_OUTPUT_INVALID", "人工内容结构不完整，请核对必填字段") from exc
 
+    @app.post("/api/v1/contents/{content_id}/visual-assets")
+    async def upload_visual_asset(
+        content_id: str,
+        revision: int,
+        file: UploadFile = File(...),
+        user: dict[str, Any] = Depends(require("content.edit")),
+    ) -> dict[str, Any]:
+        display_name = safe_display_name(file.filename or "")
+        extension = Path(display_name).suffix.lower()
+        allowed_mimes = {
+            ".png": {"image/png", "application/octet-stream"},
+            ".jpg": {"image/jpeg", "application/octet-stream"},
+            ".jpeg": {"image/jpeg", "application/octet-stream"},
+        }
+        if extension not in allowed_mimes:
+            database.audit(user["id"], "visual.upload.rejected", "content", content_id, f"拒绝替换图 {display_name}：VISUAL_FILE_TYPE_UNSUPPORTED")
+            raise ApiError(415, "VISUAL_FILE_TYPE_UNSUPPORTED", "替换图仅支持 PNG、JPG、JPEG")
+        supplied_mime = (file.content_type or "application/octet-stream").lower()
+        if supplied_mime not in allowed_mimes[extension]:
+            database.audit(user["id"], "visual.upload.rejected", "content", content_id, f"拒绝替换图 {display_name}：VISUAL_MIME_MISMATCH")
+            raise ApiError(415, "VISUAL_MIME_MISMATCH", "替换图 MIME 类型与扩展名不匹配")
+        chunks: list[bytes] = []
+        size = 0
+        while chunk := await file.read(1024 * 1024):
+            size += len(chunk)
+            if size > active_settings.max_visual_bytes:
+                database.audit(user["id"], "visual.upload.rejected", "content", content_id, f"拒绝替换图 {display_name}：VISUAL_FILE_TOO_LARGE")
+                raise ApiError(413, "VISUAL_FILE_TOO_LARGE", "替换图超过本地安全上限")
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        if not data:
+            raise ApiError(422, "VISUAL_FILE_EMPTY", "替换图不能为空")
+        try:
+            detected_mime, detected_extension, width, height = validate_raster(data)
+        except ValueError as exc:
+            database.audit(user["id"], "visual.upload.rejected", "content", content_id, f"拒绝替换图 {display_name}：VISUAL_FILE_INVALID")
+            raise ApiError(422, "VISUAL_FILE_INVALID", "替换图内容不是有效图片或尺寸不安全") from exc
+        if detected_mime != supplied_mime and supplied_mime != "application/octet-stream":
+            raise ApiError(415, "VISUAL_MIME_MISMATCH", "替换图实际类型与声明不一致")
+        try:
+            return content_repository.save_uploaded_visual(
+                user["id"], content_id, revision, display_name, data, detected_mime,
+                detected_extension, width, height, generated_root,
+            )
+        except ValueError as exc:
+            code = str(exc)
+            if code == "missing": raise ApiError(404, "CONTENT_NOT_FOUND", "内容草稿不存在") from exc
+            if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "内容已更新，请刷新后重试") from exc
+            if code == "copy_not_confirmed": raise ApiError(422, "IMAGE_COPY_NOT_CONFIRMED", "请先确认图片文案") from exc
+            raise ApiError(422, "VISUAL_UPLOAD_INVALID", "当前内容不能保存替换图") from exc
+
+    @app.patch("/api/v1/contents/{content_id}/visual-layout")
+    def update_visual_layout(content_id: str, payload: VisualLayoutRequest, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
+        try:
+            return content_repository.update_visual_layout(
+                user["id"], content_id, payload.revision, payload.template, payload.palette,
+                payload.blockOrder, payload.hiddenBlockIds,
+            )
+        except ValueError as exc:
+            code = str(exc)
+            if code == "missing": raise ApiError(404, "CONTENT_NOT_FOUND", "内容草稿不存在") from exc
+            if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "内容已更新，请刷新后重试") from exc
+            if code == "visual_missing": raise ApiError(422, "VISUAL_NOT_READY", "请先生成或上传视觉素材") from exc
+            if code == "required_block": raise ApiError(422, "VISUAL_REQUIRED_BLOCK", "标题、产品主体和免责声明不可隐藏") from exc
+            raise ApiError(422, "VISUAL_LAYOUT_INVALID", "图片区块顺序或显隐设置无效") from exc
+
+    @app.get("/api/v1/visual-assets/{asset_id}/preview", response_model=None)
+    def preview_visual_asset(asset_id: str, _: dict[str, Any] = Depends(require("asset.view"))) -> FileResponse:
+        asset = content_repository.get_visual_asset(asset_id)
+        if asset is None:
+            raise ApiError(404, "VISUAL_ASSET_NOT_FOUND", "视觉素材不存在或已失效")
+        try:
+            path = content_repository._visual_path(generated_root, asset["storage_key"])
+        except ValueError as exc:
+            raise ApiError(400, "UNSAFE_STORAGE_PATH", "视觉素材路径不安全") from exc
+        if not path.is_file():
+            raise ApiError(404, "VISUAL_FILE_MISSING", "视觉文件缺失，可重新生成或上传替换图")
+        return FileResponse(path, media_type=asset["mime_type"], headers={"Cache-Control": "private, max-age=60", "X-Content-Type-Options": "nosniff"})
+
     @app.get("/api/health", include_in_schema=False)
     def legacy_health() -> dict[str, Any]: return {"ok": True, "service": "baochuang-api", "version": "0.2.0"}
 
     @app.get("/api/config", include_in_schema=False)
-    def legacy_config() -> dict[str, Any]: return {"deepseekConfigured": bool(os.getenv("DEEPSEEK_API_KEY", "").strip()), "qwenConfigured": bool(os.getenv("DASHSCOPE_API_KEY", "").strip()), "deepseekModel": os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")}
+    def legacy_config() -> dict[str, Any]: return {"deepseekConfigured": bool(os.getenv("DEEPSEEK_API_KEY", "").strip()), "qwenConfigured": bool(os.getenv("DASHSCOPE_API_KEY", "").strip()), "deepseekModel": os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"), "qwenModel": os.getenv("QWEN_IMAGE_MODEL", "qwen-image-3.0")}
 
     @app.get("/api/state", include_in_schema=False)
     def legacy_state() -> dict[str, Any]:

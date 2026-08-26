@@ -58,14 +58,22 @@ CREATE TABLE IF NOT EXISTS generation_jobs (
     status TEXT NOT NULL, input_json TEXT NOT NULL, output_json TEXT NOT NULL DEFAULT '{}',
     public_error TEXT NOT NULL DEFAULT '', error_code TEXT NOT NULL DEFAULT '', attempt INTEGER NOT NULL DEFAULT 0,
     idempotency_key TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT 'deepseek', model TEXT NOT NULL DEFAULT '',
-    cancel_requested INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    provider_task_id TEXT NOT NULL DEFAULT '', cancel_requested INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     UNIQUE(content_id, task_type, idempotency_key)
+);
+CREATE TABLE IF NOT EXISTS visual_assets (
+    id TEXT PRIMARY KEY, content_id TEXT NOT NULL REFERENCES content_items(id) ON DELETE CASCADE,
+    job_id TEXT REFERENCES generation_jobs(id) ON DELETE SET NULL, source TEXT NOT NULL,
+    original_name TEXT NOT NULL DEFAULT '', storage_key TEXT NOT NULL UNIQUE, mime_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL, checksum TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ready', created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_products_updated ON products(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_source_documents_product ON source_documents(product_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_time ON audit_logs(occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_content_items_updated ON content_items(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_generation_jobs_content ON generation_jobs(content_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_visual_assets_content ON visual_assets(content_id, created_at DESC);
 """
 
 DEFAULT_FACTS = ["投保年龄", "保障期间", "等待期", "缴费期间"]
@@ -99,6 +107,7 @@ class Database:
         with self.connect() as connection:
             connection.executescript(SCHEMA)
             self._migrate_stage01(connection)
+            self._migrate_stage04(connection)
             self._seed(connection)
 
     @staticmethod
@@ -117,6 +126,19 @@ class Database:
         if "required" not in fact_columns:
             connection.execute("ALTER TABLE product_facts ADD COLUMN required INTEGER NOT NULL DEFAULT 1")
         connection.execute("UPDATE products SET created_at = updated_at WHERE created_at = ''")
+
+    @staticmethod
+    def _migrate_stage04(connection: sqlite3.Connection) -> None:
+        job_columns = {row[1] for row in connection.execute("PRAGMA table_info(generation_jobs)")}
+        if "provider_task_id" not in job_columns:
+            connection.execute("ALTER TABLE generation_jobs ADD COLUMN provider_task_id TEXT NOT NULL DEFAULT ''")
+        connection.execute(
+            """UPDATE generation_jobs
+               SET status = 'failed', error_code = 'JOB_INTERRUPTED',
+                   public_error = '服务重启中断了生成任务，输入已保留，可重新尝试', updated_at = ?
+               WHERE status = 'running'""",
+            (now_iso(),),
+        )
 
     @staticmethod
     def _seed(connection: sqlite3.Connection) -> None:

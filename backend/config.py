@@ -38,7 +38,9 @@ class Settings:
     database_url: str = "sqlite:///data/baochuang.db"
     frontend_dist: Path = ROOT_DIR / "dist"
     upload_dir: Path = ROOT_DIR / "data" / "uploads"
+    generated_dir: Path = ROOT_DIR / "data" / "generated"
     max_upload_bytes: int = 20 * 1024 * 1024
+    max_visual_bytes: int = 15 * 1024 * 1024
 
     @property
     def database_path(self) -> Path:
@@ -50,5 +52,7 @@ class Settings:
         return cls(
             database_url=os.getenv("APP_DATABASE_URL", cls.database_url),
             upload_dir=Path(os.getenv("APP_UPLOAD_DIR", str(cls.upload_dir))),
+            generated_dir=Path(os.getenv("APP_GENERATED_DIR", str(cls.generated_dir))),
             max_upload_bytes=int(os.getenv("APP_MAX_UPLOAD_BYTES", str(cls.max_upload_bytes))),
+            max_visual_bytes=int(os.getenv("APP_MAX_VISUAL_BYTES", str(cls.max_visual_bytes))),
         )
