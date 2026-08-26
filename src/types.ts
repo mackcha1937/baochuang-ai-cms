@@ -89,3 +89,45 @@ export interface ProductDocument {
   structure?: Record<string, unknown>;
   manualText?: string;
 }
+
+export type ContentType = "image" | "article" | "training";
+
+export interface GenerationJob {
+  id: string;
+  contentId: string;
+  branchId: string | null;
+  taskType: string;
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  input: Record<string, unknown>;
+  output: Record<string, unknown>;
+  error: string;
+  errorCode: string;
+  attempt: number;
+  provider: string;
+  model: string;
+}
+
+export interface ContentBranch {
+  id: string;
+  channel: "wechat" | "xiaohongshu";
+  outline: Record<string, unknown>;
+  outlineStatus: "empty" | "draft" | "confirmed";
+  body: Record<string, unknown>;
+  bodyStatus: "empty" | "draft" | "confirmed";
+}
+
+export interface ContentItem {
+  id: string;
+  type: ContentType;
+  title: string;
+  productId: string | null;
+  status: string;
+  revision: number;
+  manualSource: string;
+  settings: Record<string, unknown>;
+  payload: Record<string, any>;
+  branches: ContentBranch[];
+  jobs: GenerationJob[];
+  createdAt: string;
+  updatedAt: string;
+}

@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from backend.config import Settings
+from backend.ai_content import AIProvider, ContentRepository, DeepSeekProvider
 from backend.database import Database
 from backend.document_parser import EmptyDocumentError, parse_document
 
@@ -61,6 +62,40 @@ class ManualTextRequest(BaseModel):
     text: str = Field(max_length=500_000)
 
 
+class ContentCreateRequest(BaseModel):
+    type: str
+    title: str = Field(min_length=1, max_length=150)
+    productId: Optional[str] = None
+    manualSource: str = Field(default="", max_length=100_000)
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("type")
+    @classmethod
+    def valid_type(cls, value: str) -> str:
+        if value not in {"image", "article", "training"}:
+            raise ValueError("不支持的内容类型")
+        return value
+
+
+class JobCreateRequest(BaseModel):
+    taskType: str
+    branchId: Optional[str] = None
+    instruction: str = Field(default="", max_length=2000)
+
+
+class ContentConfirmRequest(BaseModel):
+    node: str
+    branchId: Optional[str] = None
+    revision: int = Field(ge=1)
+
+
+class ManualOutputRequest(BaseModel):
+    taskType: str
+    branchId: Optional[str] = None
+    revision: int = Field(ge=1)
+    output: dict[str, Any]
+
+
 ALLOWED_FILES = {
     ".pdf": {"application/pdf", "application/octet-stream"},
     ".docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/octet-stream"},
@@ -104,9 +139,11 @@ def storage_path(upload_root: Path, storage_key: str) -> Path:
     return candidate
 
 
-def create_app(settings: Optional[Settings] = None) -> FastAPI:
+def create_app(settings: Optional[Settings] = None, ai_provider: Optional[AIProvider] = None) -> FastAPI:
     active_settings = settings or Settings.from_environment()
     database = Database(active_settings.database_path)
+    content_repository = ContentRepository(database)
+    provider = ai_provider or DeepSeekProvider()
     upload_root = active_settings.upload_dir
 
     @asynccontextmanager
@@ -116,7 +153,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         yield
 
     app = FastAPI(title="保创AI API", version="0.2.0", docs_url="/api/docs" if os.getenv("APP_ENV") != "production" else None, redoc_url=None, lifespan=lifespan)
-    app.state.database, app.state.settings = database, active_settings
+    app.state.database, app.state.settings, app.state.ai_provider = database, active_settings, provider
 
     @app.exception_handler(ApiError)
     async def api_exception_handler(_: Request, exc: ApiError) -> JSONResponse:
@@ -313,6 +350,114 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def audit_logs(user: dict[str, Any] = Depends(require("audit.view"))) -> dict[str, Any]:
         items = database.get_recent_audit(100)
         return {"items": items, "total": len(items)}
+
+    @app.get("/api/v1/contents")
+    def list_contents(type: str = Query(default="", max_length=20)) -> dict[str, Any]:
+        if type and type not in {"image", "article", "training"}:
+            raise ApiError(422, "CONTENT_TYPE_INVALID", "不支持的内容类型")
+        items = content_repository.list_items(type)
+        return {"items": items, "total": len(items)}
+
+    @app.post("/api/v1/contents", status_code=201)
+    def create_content(payload: ContentCreateRequest, user: dict[str, Any] = Depends(require("content.create"))) -> dict[str, Any]:
+        if not payload.productId and not payload.manualSource.strip():
+            raise ApiError(422, "CONTENT_SOURCE_REQUIRED", "请选择已确认产品或填写人工素材")
+        if payload.type == "article":
+            channels = payload.settings.get("channels", [])
+            if not isinstance(channels, list) or not channels or any(channel not in {"wechat", "xiaohongshu"} for channel in channels):
+                raise ApiError(422, "ARTICLE_CHANNEL_REQUIRED", "至少选择公众号或小红书一个渠道")
+        try:
+            return content_repository.create_item(user["id"], payload.type, payload.title.strip(), payload.productId, payload.manualSource.strip(), payload.settings)
+        except ValueError as exc:
+            if str(exc) == "product_not_confirmed":
+                raise ApiError(422, "PRODUCT_NOT_CONFIRMED", "只能使用已确认产品") from exc
+            raise
+
+    @app.get("/api/v1/contents/{content_id}")
+    def get_content(content_id: str) -> dict[str, Any]:
+        item = content_repository.get_item(content_id)
+        if item is None:
+            raise ApiError(404, "CONTENT_NOT_FOUND", "内容草稿不存在或已删除")
+        return item
+
+    @app.post("/api/v1/contents/{content_id}/jobs", status_code=201)
+    def create_generation_job(content_id: str, payload: JobCreateRequest, request: Request, user: dict[str, Any] = Depends(require("content.edit"))) -> JSONResponse:
+        if payload.taskType not in {"image_copy", "article_outline", "article_generate", "training_outline", "training_script"}:
+            raise ApiError(422, "AI_TASK_UNSUPPORTED", "不支持的生成任务")
+        idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+        if not idempotency_key or len(idempotency_key) > 100:
+            raise ApiError(422, "IDEMPOTENCY_KEY_REQUIRED", "生成任务必须提供有效幂等键")
+        try:
+            job, created = content_repository.create_job(user["id"], content_id, payload.taskType, payload.branchId, idempotency_key, payload.instruction.strip())
+            return JSONResponse(status_code=201 if created else 200, content=job)
+        except ValueError as exc:
+            code = str(exc)
+            if code == "missing": raise ApiError(404, "CONTENT_NOT_FOUND", "内容或渠道分支不存在") from exc
+            if code == "invalid_task": raise ApiError(422, "AI_TASK_UNSUPPORTED", "生成任务与内容类型不匹配") from exc
+            if code == "node_locked": raise ApiError(409, "CONTENT_NODE_LOCKED", "节点已确认，不能重新生成") from exc
+            if code == "outline_not_confirmed": raise ApiError(422, "OUTLINE_NOT_CONFIRMED", "请先确认框架") from exc
+            raise
+
+    @app.post("/api/v1/jobs/{job_id}/run")
+    def run_generation_job(job_id: str, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
+        try:
+            return content_repository.run_job(user["id"], job_id, provider)
+        except ValueError as exc:
+            if str(exc) == "missing": raise ApiError(404, "JOB_NOT_FOUND", "生成任务不存在") from exc
+            if str(exc) == "node_locked": raise ApiError(409, "CONTENT_NODE_LOCKED", "节点已确认，不能执行历史任务") from exc
+            raise ApiError(409, "JOB_STATE_CONFLICT", "当前任务状态不能执行") from exc
+
+    @app.post("/api/v1/jobs/{job_id}/retry")
+    def retry_generation_job(job_id: str, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
+        try:
+            return content_repository.run_job(user["id"], job_id, provider)
+        except ValueError as exc:
+            if str(exc) == "missing": raise ApiError(404, "JOB_NOT_FOUND", "生成任务不存在") from exc
+            if str(exc) == "node_locked": raise ApiError(409, "CONTENT_NODE_LOCKED", "节点已确认，不能重试历史任务") from exc
+            raise ApiError(409, "JOB_STATE_CONFLICT", "仅失败或已取消任务可重试") from exc
+
+    @app.get("/api/v1/jobs/{job_id}")
+    def get_generation_job(job_id: str) -> dict[str, Any]:
+        job = content_repository.get_job(job_id)
+        if job is None: raise ApiError(404, "JOB_NOT_FOUND", "生成任务不存在")
+        return job
+
+    @app.post("/api/v1/jobs/{job_id}/cancel")
+    def cancel_generation_job(job_id: str, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
+        try:
+            job = content_repository.cancel_job(user["id"], job_id)
+        except ValueError as exc:
+            raise ApiError(409, "JOB_STATE_CONFLICT", "已完成任务不能取消") from exc
+        if job is None: raise ApiError(404, "JOB_NOT_FOUND", "生成任务不存在")
+        return job
+
+    @app.post("/api/v1/contents/{content_id}/confirm")
+    def confirm_content_node(content_id: str, payload: ContentConfirmRequest, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
+        allowed = {"copy", "outline", "script"}
+        if payload.node not in allowed:
+            raise ApiError(422, "CONTENT_NODE_INVALID", "不支持的确认节点")
+        try:
+            return content_repository.confirm_node(user["id"], content_id, payload.node, payload.branchId, payload.revision)
+        except ValueError as exc:
+            code = str(exc)
+            if code == "missing": raise ApiError(404, "CONTENT_NOT_FOUND", "内容或渠道分支不存在") from exc
+            if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "内容已更新，请刷新后重试") from exc
+            raise ApiError(422, "CONTENT_NODE_INCOMPLETE", "当前节点没有可确认内容") from exc
+
+    @app.put("/api/v1/contents/{content_id}/manual-output")
+    def save_manual_output(content_id: str, payload: ManualOutputRequest, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
+        if payload.taskType not in {"image_copy", "article_outline", "article_generate", "training_outline", "training_script"}:
+            raise ApiError(422, "AI_TASK_UNSUPPORTED", "不支持的内容节点")
+        try:
+            return content_repository.save_manual_output(user["id"], content_id, payload.taskType, payload.branchId, payload.revision, payload.output)
+        except ValueError as exc:
+            code = str(exc)
+            if code == "missing": raise ApiError(404, "CONTENT_NOT_FOUND", "内容或渠道分支不存在") from exc
+            if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "内容已更新，请刷新后重试") from exc
+            if code == "invalid_task": raise ApiError(422, "AI_TASK_UNSUPPORTED", "内容节点与项目类型不匹配") from exc
+            if code == "node_locked": raise ApiError(409, "CONTENT_NODE_LOCKED", "节点已确认，不能覆盖") from exc
+            if code == "outline_not_confirmed": raise ApiError(422, "OUTLINE_NOT_CONFIRMED", "请先确认框架") from exc
+            raise ApiError(422, "MANUAL_OUTPUT_INVALID", "人工内容结构不完整，请核对必填字段") from exc
 
     @app.get("/api/health", include_in_schema=False)
     def legacy_health() -> dict[str, Any]: return {"ok": True, "service": "baochuang-api", "version": "0.2.0"}

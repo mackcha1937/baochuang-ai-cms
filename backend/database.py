@@ -39,9 +39,33 @@ CREATE TABLE IF NOT EXISTS source_documents (
 );
 CREATE TABLE IF NOT EXISTS idempotency_keys (actor_id TEXT NOT NULL, action TEXT NOT NULL, key TEXT NOT NULL, object_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (actor_id, action, key));
 CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at TEXT NOT NULL, actor_id TEXT NOT NULL, action TEXT NOT NULL, object_type TEXT NOT NULL, object_id TEXT NOT NULL, detail TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS content_items (
+    id TEXT PRIMARY KEY, type TEXT NOT NULL, title TEXT NOT NULL,
+    product_id TEXT REFERENCES products(id), manual_source TEXT NOT NULL DEFAULT '',
+    settings_json TEXT NOT NULL DEFAULT '{}', payload_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1, owner_id TEXT NOT NULL,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS content_branches (
+    id TEXT PRIMARY KEY, content_id TEXT NOT NULL REFERENCES content_items(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL, outline_json TEXT NOT NULL DEFAULT '{}', outline_status TEXT NOT NULL DEFAULT 'empty',
+    body_json TEXT NOT NULL DEFAULT '{}', body_status TEXT NOT NULL DEFAULT 'empty', updated_at TEXT NOT NULL,
+    UNIQUE(content_id, channel)
+);
+CREATE TABLE IF NOT EXISTS generation_jobs (
+    id TEXT PRIMARY KEY, content_id TEXT NOT NULL REFERENCES content_items(id) ON DELETE CASCADE,
+    branch_id TEXT REFERENCES content_branches(id) ON DELETE CASCADE, task_type TEXT NOT NULL,
+    status TEXT NOT NULL, input_json TEXT NOT NULL, output_json TEXT NOT NULL DEFAULT '{}',
+    public_error TEXT NOT NULL DEFAULT '', error_code TEXT NOT NULL DEFAULT '', attempt INTEGER NOT NULL DEFAULT 0,
+    idempotency_key TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT 'deepseek', model TEXT NOT NULL DEFAULT '',
+    cancel_requested INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    UNIQUE(content_id, task_type, idempotency_key)
+);
 CREATE INDEX IF NOT EXISTS idx_products_updated ON products(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_source_documents_product ON source_documents(product_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_time ON audit_logs(occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_content_items_updated ON content_items(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_generation_jobs_content ON generation_jobs(content_id, created_at DESC);
 """
 
 DEFAULT_FACTS = ["投保年龄", "保障期间", "等待期", "缴费期间"]
