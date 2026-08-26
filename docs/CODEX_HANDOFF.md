@@ -6,7 +6,7 @@
 - 当前分支：`stage/02-product-library`
 - Stage 00：已验收，保留在 `stage/00-preparation`
 - Stage 01：已验收，保留在 `stage/01-foundation`
-- Stage 02：产品资料库闭环已完成全量验收；功能与验收提交在提交后回填
+- Stage 02：产品资料库闭环已完成全量验收；功能与验收提交为 `c7bc303`
 - 连续开发授权：Stage 02 通过、报告归档且工作树干净后，自动创建下一阶段分支继续开发
 
 ## Stage 02 已完成

@@ -4,7 +4,7 @@
 - 日期：2026-08-26
 - 分支：`stage/02-product-library`
 - 阶段起点：`79d0d4a`
-- 功能与验收提交：提交后回填
+- 功能与验收提交：`c7bc303`
 - 环境：macOS、Python 3.12、FastAPI 0.116.1、SQLite、React 19、Vite 7、Chromium
 
 ## 1. 范围与边界
