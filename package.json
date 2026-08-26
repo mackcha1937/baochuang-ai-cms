@@ -1,7 +1,7 @@
 {
   "name": "baochuang-ai-foundation",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n api,web -c magenta,cyan \".venv/bin/python server.py\" \"vite\"",

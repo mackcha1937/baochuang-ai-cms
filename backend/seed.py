@@ -21,6 +21,13 @@ DEMO_USER: dict[str, Any] = {
     "roles": ["企业管理员", "内容创作者", "产品审核员", "合规审核员"],
 }
 
+VIEWER_USER: dict[str, Any] = {
+    "id": "viewer-demo",
+    "name": "只读演示用户",
+    "mode": "local_demo",
+    "roles": ["只读访客"],
+}
+
 PERMISSIONS = [
     "brand.manage",
     "product.create",

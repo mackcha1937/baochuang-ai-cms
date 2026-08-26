@@ -14,6 +14,7 @@ def make_client(tmp_path: Path) -> TestClient:
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'stage01.db'}",
         frontend_dist=tmp_path / "missing-dist",
+        upload_dir=tmp_path / "uploads",
     )
     return TestClient(create_app(settings))
 

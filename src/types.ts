@@ -60,6 +60,32 @@ export interface ProductSummary {
 export interface ProductDetail extends ProductSummary {
   summary: string;
   features: string[];
-  facts: Array<{ label: string; value: string; confirmed: boolean }>;
-  documents: Array<{ name: string; type: string; status: string }>;
+  facts: ProductFact[];
+  documents: ProductDocument[];
+  revision: number;
+  ownerId: string;
+  createdAt: string;
+  confirmedAt: string | null;
+}
+
+export interface ProductFact {
+  label: string;
+  value: string;
+  confirmed: boolean;
+  required: boolean;
+}
+
+export interface ProductDocument {
+  id: string | null;
+  name: string;
+  originalName?: string;
+  type: string;
+  status: string;
+  legacy: boolean;
+  sizeBytes?: number;
+  parseError?: string;
+  attempt?: number;
+  extractedText?: string;
+  structure?: Record<string, unknown>;
+  manualText?: string;
 }

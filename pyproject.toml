@@ -1,11 +1,15 @@
 [project]
 name = "baochuang-ai"
-version = "0.1.0"
+version = "0.2.0"
 description = "保创AI保险中介内容智能平台"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
   "uvicorn[standard]>=0.30,<1",
+  "python-multipart>=0.0.20,<1",
+  "pypdf>=6,<7",
+  "python-docx>=1.2,<2",
+  "openpyxl>=3.1,<4",
 ]
 
 [project.optional-dependencies]
