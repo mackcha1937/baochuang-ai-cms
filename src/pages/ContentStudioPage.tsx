@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { PageHeader } from "../components/PageHeader";
 import { EmptyState, ErrorState, LoadingState } from "../components/States";
 import { apiGet, apiJson, apiRequest, AppError, uploadVisualFile } from "../lib/api";
-import type { ContentBranch, ContentItem, ContentType, GenerationJob, ProductSummary, TrainingSession, VisualDraft, VisualLayout } from "../types";
+import type { ContentBranch, ContentItem, ContentReviewSummary, ContentReviewStatus, ContentType, GenerationJob, ProductSummary, ReviewTask, TrainingSession, VisualDraft, VisualLayout } from "../types";
 
 const labels = {
   image: { eyebrow: "AI IMAGE STUDIO", title: "AI图片创作", description: "先确认保险营销文案，再由千问生成无关键文字视觉素材并进行确定性排版。" },
@@ -37,6 +38,7 @@ export function ContentStudioPage({ type }: { type: ContentType }) {
   const [productId, setProductId] = useState("darwin-12");
   const [manualSource, setManualSource] = useState("");
   const [channels, setChannels] = useState<string[]>(["wechat"]);
+  const reviewKeys = useRef(new Map<string, string>());
 
   async function loadList() {
     setLoading(true); setError(null);
@@ -225,6 +227,41 @@ export function ContentStudioPage({ type }: { type: ContentType }) {
     finally { setBusy(false); }
   }
 
+  async function submitReview(branchId?: string) {
+    if (!active || !window.confirm("提交后将锁定当前版本并进入产品事实审核，确定继续吗？")) return;
+    const action = `${active.id}:${branchId ?? "content"}:submit`;
+    const key = reviewKeys.current.get(action) ?? crypto.randomUUID();
+    reviewKeys.current.set(action, key);
+    setBusy(true); setError(null);
+    try {
+      await apiRequest<ReviewTask>(`/contents/${active.id}/submit-review`, { method: "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify({ revision: active.revision, branchId: branchId ?? null }) });
+      setActive(await apiGet<ContentItem>(`/contents/${active.id}`));
+      reviewKeys.current.delete(action);
+      setNotice(branchId ? "该渠道已提交产品事实审核，另一渠道仍可独立编辑" : "当前内容已提交产品事实审核");
+    } catch (reason) { setError(reason instanceof AppError ? reason.message : "提交审核失败"); }
+    finally { setBusy(false); }
+  }
+
+  async function withdrawReview(taskId: string) {
+    if (!active || !window.confirm("仅审核尚未开始时可撤回。确定撤回本次提交吗？")) return;
+    setBusy(true); setError(null);
+    try {
+      const result = await apiJson<ContentItem>(`/contents/${active.id}/withdraw-review`, "POST", { revision: active.revision, taskId });
+      setActive(result); setNotice("提交已撤回，可以继续修改后重新提交");
+    } catch (reason) { setError(reason instanceof AppError ? reason.message : "撤回审核失败"); }
+    finally { setBusy(false); }
+  }
+
+  async function reopenReview(branchId?: string) {
+    if (!active || !window.confirm("返回修改会解锁最终内容并创建新修订，原审核版本和记录会永久保留。确定继续吗？")) return;
+    setBusy(true); setError(null);
+    try {
+      const result = await apiJson<ContentItem>(`/contents/${active.id}/reopen-review`, "POST", { revision: active.revision, branchId: branchId ?? null });
+      setActive(result); setNotice("已返回修改；修复并重新确认后可提交新版本");
+    } catch (reason) { setError(reason instanceof AppError ? reason.message : "返回修改失败"); }
+    finally { setBusy(false); }
+  }
+
   useEffect(() => { setActive(null); void loadList(); }, [type]);
 
   if (loading) return <LoadingState label={`正在读取${meta.title}项目`} />;
@@ -233,17 +270,20 @@ export function ContentStudioPage({ type }: { type: ContentType }) {
   return <div className="page-stack">
     <PageHeader eyebrow={meta.eyebrow} title={meta.title} description={meta.description} actions={<button className="button" type="button" onClick={() => { setTitle(""); setManualSource(""); setError(null); setShowCreate(true); }}>＋ 新建创作</button>} />
     {(error || notice) && <div className={error ? "feedback-bar feedback-bar--error" : "feedback-bar"} role={error ? "alert" : "status"}>{error ?? notice}</div>}
-    {active ? <Studio type={type} item={active} busy={busy} onBack={() => { setActive(null); setError(null); void loadList(); }} onRun={runTask} onRetry={retryJob} onCancel={cancelJob} onConfirm={confirm} onSaveManual={saveManual} onUnlockCopy={unlockCopy} onUnlockScript={unlockScript} onSaveVisualLayout={saveVisualLayout} onUploadVisual={uploadVisual} onSaveTrainingSession={saveTrainingSession} onSubmitTrainingQuiz={submitTrainingQuiz} onResetTrainingQuiz={resetTrainingQuiz} /> : items.length ? <section className="content-project-grid">{items.map((item) => <button type="button" className="content-project-card" key={item.id} onClick={() => void openItem(item.id)}><span className="status-badge">{item.status}</span><span className="eyebrow">{item.type.toUpperCase()}</span><strong>{item.title}</strong><small>修订 {item.revision} · {new Date(item.updatedAt).toLocaleString("zh-CN")}</small><i>继续创作 →</i></button>)}</section> : <EmptyState title={`还没有${meta.title}项目`} description="新建草稿后，生成失败或刷新页面都不会丢失已经完成的输入。" action={<button className="button" type="button" onClick={() => setShowCreate(true)}>新建第一个项目</button>} />}
+    {active ? <Studio type={type} item={active} busy={busy} onBack={() => { setActive(null); setError(null); void loadList(); }} onRun={runTask} onRetry={retryJob} onCancel={cancelJob} onConfirm={confirm} onSaveManual={saveManual} onUnlockCopy={unlockCopy} onUnlockScript={unlockScript} onSaveVisualLayout={saveVisualLayout} onUploadVisual={uploadVisual} onSaveTrainingSession={saveTrainingSession} onSubmitTrainingQuiz={submitTrainingQuiz} onResetTrainingQuiz={resetTrainingQuiz} onSubmitReview={submitReview} onWithdrawReview={withdrawReview} onReopenReview={reopenReview} /> : items.length ? <section className="content-project-grid">{items.map((item) => <button type="button" className="content-project-card" key={item.id} onClick={() => void openItem(item.id)}><span className="status-badge">{item.status}</span><span className="eyebrow">{item.type.toUpperCase()}</span><strong>{item.title}</strong><small>修订 {item.revision} · {new Date(item.updatedAt).toLocaleString("zh-CN")}</small><i>继续创作 →</i></button>)}</section> : <EmptyState title={`还没有${meta.title}项目`} description="新建草稿后，生成失败或刷新页面都不会丢失已经完成的输入。" action={<button className="button" type="button" onClick={() => setShowCreate(true)}>新建第一个项目</button>} />}
     {showCreate && <div className="modal-backdrop"><section className="modal-card studio-create" role="dialog" aria-modal="true" aria-labelledby="content-create-title"><span className="eyebrow">NEW AI CONTENT</span><h2 id="content-create-title">新建{meta.title}草稿</h2><p>选择已确认产品，或不选择产品并填写人工素材。AI Key 只由后端读取。</p><label className="field"><span>项目标题 *</span><input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label className="field"><span>已确认产品</span><select value={productId} onChange={(event) => setProductId(event.target.value)}><option value="">不使用产品档案</option>{products.map((product) => <option value={product.id} key={product.id}>{product.name}</option>)}</select></label><label className="field"><span>人工补充素材</span><textarea rows={4} value={manualSource} onChange={(event) => setManualSource(event.target.value)} placeholder="可补充受众、场景、限制或自有素材" /></label>{type === "article" && <fieldset className="channel-picker"><legend>发布渠道 *</legend>{(["wechat", "xiaohongshu"] as const).map((channel) => <label key={channel}><input type="checkbox" checked={channels.includes(channel)} onChange={(event) => setChannels((current) => event.target.checked ? [...current, channel] : current.filter((item) => item !== channel))} />{channelLabel[channel]}</label>)}</fieldset>}<div className="modal-actions"><button className="button button--secondary" type="button" disabled={busy} onClick={() => setShowCreate(false)}>取消</button><button className="button" type="button" disabled={busy || (type === "article" && !channels.length)} onClick={() => void createItem()}>创建草稿</button></div></section></div>}
   </div>;
 }
 
-function Studio({ type, item, busy, onBack, onRun, onRetry, onCancel, onConfirm, onSaveManual, onUnlockCopy, onUnlockScript, onSaveVisualLayout, onUploadVisual, onSaveTrainingSession, onSubmitTrainingQuiz, onResetTrainingQuiz }: { type: ContentType; item: ContentItem; busy: boolean; onBack: () => void; onRun: (task: string, branchId?: string, instruction?: string) => Promise<void>; onRetry: (job: GenerationJob) => Promise<void>; onCancel: (job: GenerationJob) => Promise<void>; onConfirm: (node: string, branchId?: string) => Promise<void>; onSaveManual: (task: string, output: Record<string, unknown>, branchId?: string) => Promise<void>; onUnlockCopy: () => Promise<void>; onUnlockScript: () => Promise<void>; onSaveVisualLayout: (layout: Pick<VisualLayout, "template" | "palette" | "blockOrder" | "hiddenBlockIds">) => Promise<void>; onUploadVisual: (file: File) => Promise<void>; onSaveTrainingSession: (session: Pick<TrainingSession, "chapterIndex" | "sentenceIndex" | "playbackRate" | "mode" | "answers">) => Promise<void>; onSubmitTrainingQuiz: (answers: string[]) => Promise<void>; onResetTrainingQuiz: () => Promise<void> }) {
+function Studio({ type, item, busy, onBack, onRun, onRetry, onCancel, onConfirm, onSaveManual, onUnlockCopy, onUnlockScript, onSaveVisualLayout, onUploadVisual, onSaveTrainingSession, onSubmitTrainingQuiz, onResetTrainingQuiz, onSubmitReview, onWithdrawReview, onReopenReview }: { type: ContentType; item: ContentItem; busy: boolean; onBack: () => void; onRun: (task: string, branchId?: string, instruction?: string) => Promise<void>; onRetry: (job: GenerationJob) => Promise<void>; onCancel: (job: GenerationJob) => Promise<void>; onConfirm: (node: string, branchId?: string) => Promise<void>; onSaveManual: (task: string, output: Record<string, unknown>, branchId?: string) => Promise<void>; onUnlockCopy: () => Promise<void>; onUnlockScript: () => Promise<void>; onSaveVisualLayout: (layout: Pick<VisualLayout, "template" | "palette" | "blockOrder" | "hiddenBlockIds">) => Promise<void>; onUploadVisual: (file: File) => Promise<void>; onSaveTrainingSession: (session: Pick<TrainingSession, "chapterIndex" | "sentenceIndex" | "playbackRate" | "mode" | "answers">) => Promise<void>; onSubmitTrainingQuiz: (answers: string[]) => Promise<void>; onResetTrainingQuiz: () => Promise<void>; onSubmitReview: (branchId?: string) => Promise<void>; onWithdrawReview: (taskId: string) => Promise<void>; onReopenReview: (branchId?: string) => Promise<void> }) {
+  const overallLocked = type !== "article" && item.status !== "draft";
+  const overallComplete = type === "image" ? item.payload.copyStatus === "confirmed" && item.payload.visual?.status === "draft" : type === "training" ? item.payload.scriptStatus === "confirmed" : false;
   return <div className="page-stack"><button className="back-link studio-back" type="button" onClick={onBack}>← 返回项目列表</button><section className="panel studio-summary"><div><span className="eyebrow">CONTENT DRAFT</span><h2>{item.title}</h2><p>修订 {item.revision} · {item.productId ? "使用已确认产品" : "使用人工素材"}</p></div><span className="status-badge">{item.status}</span></section>
-    {type === "image" && <ImageStudio item={item} busy={busy} onRun={onRun} onConfirm={onConfirm} onSaveManual={onSaveManual} onUnlockCopy={onUnlockCopy} onSaveVisualLayout={onSaveVisualLayout} onUploadVisual={onUploadVisual} />}
-    {type === "article" && <div className="branch-grid">{item.branches.map((branch) => <ArticleBranch key={branch.id} item={item} branch={branch} busy={busy} onRun={onRun} onConfirm={onConfirm} onSaveManual={onSaveManual} />)}</div>}
-    {type === "training" && <TrainingStudio item={item} busy={busy} onRun={onRun} onConfirm={onConfirm} onSaveManual={onSaveManual} onUnlockScript={onUnlockScript} onSaveSession={onSaveTrainingSession} onSubmitQuiz={onSubmitTrainingQuiz} onResetQuiz={onResetTrainingQuiz} />}
-    <JobPanel item={item} jobs={item.jobs} busy={busy} onRetry={onRetry} onCancel={onCancel} />
+    {type === "image" && <ImageStudio item={item} busy={busy || overallLocked} onRun={onRun} onConfirm={onConfirm} onSaveManual={onSaveManual} onUnlockCopy={onUnlockCopy} onSaveVisualLayout={onSaveVisualLayout} onUploadVisual={onUploadVisual} />}
+    {type === "article" && <div className="branch-grid">{item.branches.map((branch) => <ArticleBranch key={branch.id} item={item} branch={branch} busy={busy} onRun={onRun} onConfirm={onConfirm} onSaveManual={onSaveManual} onSubmitReview={onSubmitReview} onWithdrawReview={onWithdrawReview} onReopenReview={onReopenReview} />)}</div>}
+    {type === "training" && <TrainingStudio item={item} busy={busy} editLocked={overallLocked} onRun={onRun} onConfirm={onConfirm} onSaveManual={onSaveManual} onUnlockScript={onUnlockScript} onSaveSession={onSaveTrainingSession} onSubmitQuiz={onSubmitTrainingQuiz} onResetQuiz={onResetTrainingQuiz} />}
+    {type !== "article" && <ReviewWorkflowCard item={item} status={item.status as ContentReviewStatus} complete={overallComplete} busy={busy} onSubmit={() => onSubmitReview()} onWithdraw={onWithdrawReview} onReopen={() => onReopenReview()} />}
+    <JobPanel item={item} jobs={item.jobs} busy={busy || overallLocked} onRetry={onRetry} onCancel={onCancel} />
   </div>;
 }
 
@@ -298,11 +338,13 @@ function VisualEditor({ visual, busy, onSave, onUpload }: { visual: VisualDraft;
   </section>;
 }
 
-function ArticleBranch({ item, branch, busy, onRun, onConfirm, onSaveManual }: { item: ContentItem; branch: ContentBranch; busy: boolean; onRun: any; onConfirm: any; onSaveManual: any }) {
-  return <section className="panel studio-node"><div className="panel__heading"><div><span className="eyebrow">{branch.channel.toUpperCase()}</span><h2>{channelLabel[branch.channel]}分支</h2></div><span className="status-badge">框架 {branch.outlineStatus}</span></div>{branch.outlineStatus === "empty" ? <p className="studio-hint">该渠道拥有独立框架、失败和重试状态。</p> : <pre className="structured-output">{pretty(branch.outline)}</pre>}<ManualJsonEditor task="article_outline" value={branch.outline} disabled={busy || branch.outlineStatus === "confirmed"} onSave={(output) => onSaveManual("article_outline", output, branch.id)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || branch.outlineStatus === "confirmed"} onClick={() => void onRun("article_outline", branch.id)}>{branch.outlineStatus === "empty" ? "生成框架" : "重新生成框架"}</button>{branch.outlineStatus === "draft" && <button className="button" type="button" disabled={busy} onClick={() => void onConfirm("outline", branch.id)}>确认框架</button>}</div>{branch.outlineStatus === "confirmed" && <div className="article-body"><h3>完整文章</h3>{branch.bodyStatus === "empty" ? <p className="studio-hint">框架已锁定，可以生成全文。</p> : <pre className="structured-output">{pretty(branch.body)}</pre>}<ManualJsonEditor task="article_generate" value={branch.body} disabled={busy} onSave={(output) => onSaveManual("article_generate", output, branch.id)} /><button className="button" type="button" disabled={busy} onClick={() => void onRun("article_generate", branch.id)}>{branch.bodyStatus === "empty" ? "生成全文" : "重新生成全文"}</button></div>}</section>;
+function ArticleBranch({ item, branch, busy, onRun, onConfirm, onSaveManual, onSubmitReview, onWithdrawReview, onReopenReview }: { item: ContentItem; branch: ContentBranch; busy: boolean; onRun: any; onConfirm: any; onSaveManual: any; onSubmitReview: (branchId?: string) => Promise<void>; onWithdrawReview: (taskId: string) => Promise<void>; onReopenReview: (branchId?: string) => Promise<void> }) {
+  const reviewStatus = branch.reviewStatus ?? "draft";
+  const locked = reviewStatus !== "draft";
+  return <section className="panel studio-node"><div className="panel__heading"><div><span className="eyebrow">{branch.channel.toUpperCase()}</span><h2>{channelLabel[branch.channel]}分支</h2></div><span className="status-badge">{reviewStatus === "draft" ? `框架 ${branch.outlineStatus}` : reviewStatus}</span></div>{branch.outlineStatus === "empty" ? <p className="studio-hint">该渠道拥有独立框架、失败和重试状态。</p> : <pre className="structured-output">{pretty(branch.outline)}</pre>}<ManualJsonEditor task="article_outline" value={branch.outline} disabled={busy || locked || branch.outlineStatus === "confirmed"} onSave={(output) => onSaveManual("article_outline", output, branch.id)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || locked || branch.outlineStatus === "confirmed"} onClick={() => void onRun("article_outline", branch.id)}>{branch.outlineStatus === "empty" ? "生成框架" : "重新生成框架"}</button>{branch.outlineStatus === "draft" && <button className="button" type="button" disabled={busy || locked} onClick={() => void onConfirm("outline", branch.id)}>确认框架</button>}</div>{branch.outlineStatus === "confirmed" && <div className="article-body"><h3>完整文章</h3>{branch.bodyStatus === "empty" ? <p className="studio-hint">框架已锁定，可以生成全文。</p> : <pre className="structured-output">{pretty(branch.body)}</pre>}<ManualJsonEditor task="article_generate" value={branch.body} disabled={busy || locked || branch.bodyStatus === "confirmed"} onSave={(output) => onSaveManual("article_generate", output, branch.id)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || locked || branch.bodyStatus === "confirmed"} onClick={() => void onRun("article_generate", branch.id)}>{branch.bodyStatus === "empty" ? "生成全文" : "重新生成全文"}</button>{branch.bodyStatus === "draft" && <button className="button" type="button" disabled={busy || locked} onClick={() => void onConfirm("body", branch.id)}>确认全文</button>}</div></div>}<ReviewWorkflowCard item={item} branchId={branch.id} status={reviewStatus} complete={branch.bodyStatus === "confirmed"} busy={busy} onSubmit={() => onSubmitReview(branch.id)} onWithdraw={onWithdrawReview} onReopen={() => onReopenReview(branch.id)} /></section>;
 }
 
-function TrainingStudio({ item, busy, onRun, onConfirm, onSaveManual, onUnlockScript, onSaveSession, onSubmitQuiz, onResetQuiz }: any) {
+function TrainingStudio({ item, busy, editLocked, onRun, onConfirm, onSaveManual, onUnlockScript, onSaveSession, onSubmitQuiz, onResetQuiz }: any) {
   const outline = item.payload.outline, script = item.payload.script;
   const scriptStatus = item.payload.scriptStatus ?? (item.payload.outlineStatus === "confirmed" ? "empty" : "locked");
   const playerReady = Array.isArray(script?.chapters) && script.chapters.length > 0
@@ -310,8 +352,8 @@ function TrainingStudio({ item, busy, onRun, onConfirm, onSaveManual, onUnlockSc
     && Array.isArray(script?.questions) && script.questions.length === 3
     && script.questions.every((question: any) => question && typeof question.question === "string" && Array.isArray(question.options) && question.options.length >= 2 && question.options.every((option: unknown) => typeof option === "string") && typeof question.answer === "string" && typeof question.explanation === "string");
   return <div className="training-nodes">
-    <section className="panel studio-node"><div className="panel__heading"><h2>01 课程框架</h2><span className="status-badge">{item.payload.outlineStatus ?? "empty"}</span></div>{outline ? <pre className="structured-output">{pretty(outline)}</pre> : <p className="studio-hint">按培训对象、目的和 3 分钟时长生成章节。</p>}<ManualJsonEditor task="training_outline" value={outline} disabled={busy || item.payload.outlineStatus === "confirmed"} onSave={(output) => onSaveManual("training_outline", output)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || item.payload.outlineStatus === "confirmed"} onClick={() => void onRun("training_outline")}>生成课程框架</button>{outline && item.payload.outlineStatus !== "confirmed" && <button className="button" type="button" onClick={() => void onConfirm("outline")}>确认框架</button>}</div></section>
-    <section className="panel studio-node"><div className="panel__heading"><h2>02 培训讲稿</h2><span className="status-badge">{scriptStatus}</span></div>{script ? <pre className="structured-output">{pretty(script)}</pre> : <p className="studio-hint">确认框架后生成逐章讲稿、知识卡和 3 道测试题。</p>}<ManualJsonEditor task="training_script" value={script} disabled={busy || item.payload.outlineStatus !== "confirmed" || item.payload.scriptStatus === "confirmed"} onSave={(output) => onSaveManual("training_script", output)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || item.payload.outlineStatus !== "confirmed" || item.payload.scriptStatus === "confirmed"} onClick={() => void onRun("training_script")}>生成培训讲稿</button>{script && item.payload.scriptStatus !== "confirmed" && <button className="button" type="button" onClick={() => void onConfirm("script")}>确认讲稿</button>}{item.payload.scriptStatus === "confirmed" && <button className="button button--secondary" type="button" disabled={busy} onClick={() => void onUnlockScript()}>解锁修改讲稿</button>}</div></section>
+    <section className="panel studio-node"><div className="panel__heading"><h2>01 课程框架</h2><span className="status-badge">{item.payload.outlineStatus ?? "empty"}</span></div>{outline ? <pre className="structured-output">{pretty(outline)}</pre> : <p className="studio-hint">按培训对象、目的和 3 分钟时长生成章节。</p>}<ManualJsonEditor task="training_outline" value={outline} disabled={busy || editLocked || item.payload.outlineStatus === "confirmed"} onSave={(output) => onSaveManual("training_outline", output)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || editLocked || item.payload.outlineStatus === "confirmed"} onClick={() => void onRun("training_outline")}>生成课程框架</button>{outline && item.payload.outlineStatus !== "confirmed" && <button className="button" type="button" disabled={busy || editLocked} onClick={() => void onConfirm("outline")}>确认框架</button>}</div></section>
+    <section className="panel studio-node"><div className="panel__heading"><h2>02 培训讲稿</h2><span className="status-badge">{scriptStatus}</span></div>{script ? <pre className="structured-output">{pretty(script)}</pre> : <p className="studio-hint">确认框架后生成逐章讲稿、知识卡和 3 道测试题。</p>}<ManualJsonEditor task="training_script" value={script} disabled={busy || editLocked || item.payload.outlineStatus !== "confirmed" || item.payload.scriptStatus === "confirmed"} onSave={(output) => onSaveManual("training_script", output)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || editLocked || item.payload.outlineStatus !== "confirmed" || item.payload.scriptStatus === "confirmed"} onClick={() => void onRun("training_script")}>生成培训讲稿</button>{script && item.payload.scriptStatus !== "confirmed" && <button className="button" type="button" disabled={busy || editLocked} onClick={() => void onConfirm("script")}>确认讲稿</button>}{item.payload.scriptStatus === "confirmed" && <button className="button button--secondary" type="button" disabled={busy || editLocked} onClick={() => void onUnlockScript()}>解锁修改讲稿</button>}</div></section>
     {script && item.payload.scriptStatus === "confirmed" && playerReady ? <TrainingPlayer item={item} busy={busy} onSaveSession={onSaveSession} onSubmitQuiz={onSubmitQuiz} onResetQuiz={onResetQuiz} /> : <section className="panel training-locked"><span className="eyebrow">PLAYER LOCKED</span><h2>03 互动培训播放器</h2><p>{item.payload.scriptStatus === "confirmed" && !playerReady ? "讲稿章节或 3 道测试题结构不完整，请解锁讲稿修复后重新确认。" : "人工确认讲稿后才开放语音、字幕、章节进度和测试，避免播放未核对内容。"}</p></section>}
     {item.trainingSession?.status === "stale" && <div className="visual-warning" role="status">讲稿已解锁，旧播放进度和答题结果仅作历史保留；重新确认讲稿后会建立新的播放会话。</div>}
   </div>;
@@ -458,6 +500,27 @@ function TrainingPlayer({ item, busy, onSaveSession, onSubmitQuiz, onResetQuiz }
   </section>;
 }
 
+const reviewStatusLabel: Record<ContentReviewStatus, string> = {
+  draft: "待提交", product_review: "产品审核中", compliance_review: "合规审核中",
+  approved: "已批准", rejected_product: "产品审核已驳回", rejected_compliance: "合规审核已驳回",
+};
+
+function ReviewWorkflowCard({ item, branchId = null, status, complete, busy, onSubmit, onWithdraw, onReopen }: { item: ContentItem; branchId?: string | null; status: ContentReviewStatus; complete: boolean; busy: boolean; onSubmit: () => Promise<void>; onWithdraw: (taskId: string) => Promise<void>; onReopen: () => Promise<void> }) {
+  const reviews = (item.reviews ?? []).filter((review) => review.branchId === branchId);
+  const taskStage = status === "compliance_review" || status === "rejected_compliance" ? "compliance" : "product";
+  const task = reviews.find((review) => review.stage === taskStage && (status.startsWith("rejected") ? review.status === "rejected" : ["pending", "in_progress"].includes(review.status))) as ContentReviewSummary | undefined;
+  return <div className="review-workflow" aria-label={branchId ? "渠道审核流程" : "内容审核流程"}>
+    <div><span className="eyebrow">TWO-STEP REVIEW</span><h3>两级审核 · {reviewStatusLabel[status]}</h3><p>{status === "draft" ? (complete ? "关键内容已确认，可以提交不可变版本。" : "完成关键节点确认后才可提交审核。") : status === "product_review" ? "产品审核员核对来源、责任、年龄、金额与限制。" : status === "compliance_review" ? "产品审核已通过，等待合规最终决定。" : status === "approved" ? "两级审核均已通过；素材入库将在下一阶段完成。" : task?.lastReason || "查看审核中心中的驳回原因，修改后重新提交新版本。"}</p></div>
+    <div className="review-workflow__actions">
+      {status === "draft" && <button className="button" type="button" disabled={busy || !complete} onClick={() => void onSubmit()}>提交产品审核</button>}
+      {status === "product_review" && task?.status === "pending" && !task.startedAt && <button className="button button--secondary" type="button" disabled={busy} onClick={() => void onWithdraw(task.id)}>撤回提交</button>}
+      {["product_review", "compliance_review"].includes(status) && <Link className="button button--secondary" to="/reviews">前往审核中心</Link>}
+      {status.startsWith("rejected") && <button className="button" type="button" disabled={busy} onClick={() => void onReopen()}>按原因返回修改</button>}
+      {status === "approved" && <span className="review-approved-note">审核记录已锁定</span>}
+    </div>
+  </div>;
+}
+
 function isJobLocked(item: ContentItem, job: GenerationJob) {
   if (job.taskType === "image_copy") return item.payload.copyStatus === "confirmed";
   if (job.taskType === "article_outline") return item.branches.find((branch) => branch.id === job.branchId)?.outlineStatus === "confirmed";
@@ -467,7 +530,7 @@ function isJobLocked(item: ContentItem, job: GenerationJob) {
 }
 
 function JobPanel({ item, jobs, busy, onRetry, onCancel }: { item: ContentItem; jobs: GenerationJob[]; busy: boolean; onRetry: (job: GenerationJob) => Promise<void>; onCancel: (job: GenerationJob) => Promise<void> }) {
-  return <section className="panel"><div className="panel__heading"><div><span className="eyebrow">GENERATION JOBS</span><h2>生成任务记录</h2></div></div>{jobs.length === 0 ? <p className="studio-hint">尚未创建任务。</p> : <div className="job-list">{jobs.map((job) => { const locked = isJobLocked(item, job); return <div key={job.id}><span className={`status-badge status-badge--${job.status}`}>{job.status}</span><strong>{job.taskType}</strong><small>attempt {job.attempt} · {job.provider}{job.model ? ` / ${job.model}` : ""}</small>{job.error && <p>{job.error}</p>}{locked && ["failed", "cancelled"].includes(job.status) && <small>节点已确认，历史任务已归档</small>}{!locked && ["failed", "cancelled"].includes(job.status) && <button type="button" disabled={busy} onClick={() => void onRetry(job)}>重试</button>}{["queued", "running"].includes(job.status) && <button type="button" disabled={busy} onClick={() => void onCancel(job)}>取消</button>}</div>; })}</div>}</section>;
+  return <section className="panel"><div className="panel__heading"><div><span className="eyebrow">GENERATION JOBS</span><h2>生成任务记录</h2></div></div>{jobs.length === 0 ? <p className="studio-hint">尚未创建任务。</p> : <div className="job-list">{jobs.map((job) => { const branchReviewLocked = item.type === "article" && job.branchId ? (item.branches.find((branch) => branch.id === job.branchId)?.reviewStatus ?? "draft") !== "draft" : false; const locked = isJobLocked(item, job) || branchReviewLocked || (item.type !== "article" && item.status !== "draft"); return <div key={job.id}><span className={`status-badge status-badge--${job.status}`}>{job.status}</span><strong>{job.taskType}</strong><small>attempt {job.attempt} · {job.provider}{job.model ? ` / ${job.model}` : ""}</small>{job.error && <p>{job.error}</p>}{locked && ["failed", "cancelled"].includes(job.status) && <small>{branchReviewLocked ? "该渠道已提交审核，历史任务已归档" : "节点已确认，历史任务已归档"}</small>}{!locked && ["failed", "cancelled"].includes(job.status) && <button type="button" disabled={busy} onClick={() => void onRetry(job)}>重试</button>}{["queued", "running"].includes(job.status) && <button type="button" disabled={busy || locked} onClick={() => void onCancel(job)}>取消</button>}</div>; })}</div>}</section>;
 }
 
 const manualTemplates: Record<string, Record<string, unknown>> = {

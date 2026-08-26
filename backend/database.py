@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS content_items (
 CREATE TABLE IF NOT EXISTS content_branches (
     id TEXT PRIMARY KEY, content_id TEXT NOT NULL REFERENCES content_items(id) ON DELETE CASCADE,
     channel TEXT NOT NULL, outline_json TEXT NOT NULL DEFAULT '{}', outline_status TEXT NOT NULL DEFAULT 'empty',
-    body_json TEXT NOT NULL DEFAULT '{}', body_status TEXT NOT NULL DEFAULT 'empty', updated_at TEXT NOT NULL,
+    body_json TEXT NOT NULL DEFAULT '{}', body_status TEXT NOT NULL DEFAULT 'empty',
+    review_status TEXT NOT NULL DEFAULT 'draft', updated_at TEXT NOT NULL,
     UNIQUE(content_id, channel)
 );
 CREATE TABLE IF NOT EXISTS generation_jobs (
@@ -76,6 +77,26 @@ CREATE TABLE IF NOT EXISTS training_sessions (
     results_json TEXT NOT NULL DEFAULT '[]', attempt INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'ready', updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS content_versions (
+    id TEXT PRIMARY KEY, content_id TEXT NOT NULL REFERENCES content_items(id) ON DELETE CASCADE,
+    branch_id TEXT REFERENCES content_branches(id) ON DELETE CASCADE,
+    version_no INTEGER NOT NULL, content_revision INTEGER NOT NULL,
+    snapshot_json TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+    UNIQUE(content_id, version_no)
+);
+CREATE TABLE IF NOT EXISTS review_tasks (
+    id TEXT PRIMARY KEY, content_id TEXT NOT NULL REFERENCES content_items(id) ON DELETE CASCADE,
+    branch_id TEXT REFERENCES content_branches(id) ON DELETE CASCADE,
+    content_version_id TEXT NOT NULL REFERENCES content_versions(id) ON DELETE CASCADE,
+    stage TEXT NOT NULL, status TEXT NOT NULL, assignee_id TEXT,
+    started_at TEXT, completed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    UNIQUE(content_version_id, stage)
+);
+CREATE TABLE IF NOT EXISTS review_records (
+    id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES review_tasks(id) ON DELETE CASCADE,
+    actor_id TEXT NOT NULL, decision TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_products_updated ON products(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_source_documents_product ON source_documents(product_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_time ON audit_logs(occurred_at DESC);
@@ -83,6 +104,9 @@ CREATE INDEX IF NOT EXISTS idx_content_items_updated ON content_items(updated_at
 CREATE INDEX IF NOT EXISTS idx_generation_jobs_content ON generation_jobs(content_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_visual_assets_content ON visual_assets(content_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_training_sessions_updated ON training_sessions(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_content_versions_content ON content_versions(content_id, version_no DESC);
+CREATE INDEX IF NOT EXISTS idx_review_tasks_status ON review_tasks(status, stage, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_review_records_task ON review_records(task_id, created_at);
 """
 
 DEFAULT_FACTS = ["投保年龄", "保障期间", "等待期", "缴费期间"]
@@ -117,6 +141,7 @@ class Database:
             connection.executescript(SCHEMA)
             self._migrate_stage01(connection)
             self._migrate_stage04(connection)
+            self._migrate_stage06(connection)
             self._seed(connection)
 
     @staticmethod
@@ -148,6 +173,12 @@ class Database:
                WHERE status = 'running'""",
             (now_iso(),),
         )
+
+    @staticmethod
+    def _migrate_stage06(connection: sqlite3.Connection) -> None:
+        branch_columns = {row[1] for row in connection.execute("PRAGMA table_info(content_branches)")}
+        if "review_status" not in branch_columns:
+            connection.execute("ALTER TABLE content_branches ADD COLUMN review_status TEXT NOT NULL DEFAULT 'draft'")
 
     @staticmethod
     def _seed(connection: sqlite3.Connection) -> None:
@@ -335,8 +366,10 @@ class Database:
         return storage_key
 
     def get_stats(self) -> dict[str, int]:
-        with self.connect() as connection: product_count = connection.execute("SELECT COUNT(*) FROM products").fetchone()[0]
-        return {"products": product_count, "pendingReviews": 0, "approvedAssets": 0, "possiblyOutdated": 0}
+        with self.connect() as connection:
+            product_count = connection.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+            pending_reviews = connection.execute("SELECT COUNT(*) FROM review_tasks WHERE status IN ('pending', 'in_progress')").fetchone()[0]
+        return {"products": product_count, "pendingReviews": pending_reviews, "approvedAssets": 0, "possiblyOutdated": 0}
 
     def get_recent_audit(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as connection: rows = connection.execute("SELECT * FROM audit_logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()

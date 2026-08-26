@@ -114,6 +114,22 @@ export interface ContentBranch {
   outlineStatus: "empty" | "draft" | "confirmed";
   body: Record<string, unknown>;
   bodyStatus: "empty" | "draft" | "confirmed";
+  reviewStatus?: ContentReviewStatus;
+}
+
+export type ContentReviewStatus = "draft" | "product_review" | "compliance_review" | "approved" | "rejected_product" | "rejected_compliance";
+
+export interface ContentReviewSummary {
+  id: string;
+  branchId: string | null;
+  contentVersion: number;
+  stage: "product" | "compliance";
+  status: "pending" | "in_progress" | "approved" | "rejected" | "cancelled";
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastReason?: string;
 }
 
 export interface ContentItem {
@@ -129,8 +145,41 @@ export interface ContentItem {
   trainingSession?: TrainingSession;
   branches: ContentBranch[];
   jobs: GenerationJob[];
+  reviews?: ContentReviewSummary[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ReviewRecord {
+  id: string;
+  taskId: string;
+  actorId: string;
+  decision: "start" | "approve" | "reject" | "withdraw";
+  reason: string;
+  createdAt: string;
+}
+
+export interface ReviewTask {
+  id: string;
+  contentId: string;
+  branchId: string | null;
+  contentVersionId: string;
+  contentVersion: number;
+  contentType: ContentType;
+  contentTitle: string;
+  branchChannel: "wechat" | "xiaohongshu" | null;
+  stage: "product" | "compliance";
+  status: "pending" | "in_progress" | "approved" | "rejected" | "cancelled";
+  assigneeId: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  contentRevision?: number;
+  snapshot?: Record<string, any>;
+  submittedBy?: string;
+  submittedAt?: string;
+  records?: ReviewRecord[];
 }
 
 export interface TrainingQuizResult {

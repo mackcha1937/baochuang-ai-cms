@@ -54,8 +54,8 @@ export function apiGet<T>(path: string, timeoutMs = 10_000): Promise<T> {
   return apiRequest<T>(path, {}, timeoutMs);
 }
 
-export function apiJson<T>(path: string, method: "POST" | "PATCH" | "PUT" | "DELETE", body?: unknown, timeoutMs = 30_000): Promise<T> {
-  return apiRequest<T>(path, { method, body: body === undefined ? undefined : JSON.stringify(body) }, timeoutMs);
+export function apiJson<T>(path: string, method: "POST" | "PATCH" | "PUT" | "DELETE", body?: unknown, timeoutMs = 30_000, headers?: HeadersInit): Promise<T> {
+  return apiRequest<T>(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }, timeoutMs);
 }
 
 export function uploadProductFile(productId: string, file: File): { promise: Promise<unknown>; cancel: () => void } {

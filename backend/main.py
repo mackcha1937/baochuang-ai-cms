@@ -20,6 +20,7 @@ from backend.ai_content import AIProvider, ContentRepository, DeepSeekProvider
 from backend.database import Database
 from backend.document_parser import EmptyDocumentError, parse_document
 from backend.image_generation import ImageProvider, QwenImageProvider, validate_raster
+from backend.review import REVIEW_STAGES, ReviewRepository
 
 
 class ApiError(Exception):
@@ -140,6 +141,25 @@ class TrainingQuizRequest(BaseModel):
     answers: list[str] = Field(min_length=3, max_length=3)
 
 
+class ReviewSubmitRequest(BaseModel):
+    revision: int = Field(ge=1)
+    branchId: Optional[str] = None
+
+
+class ReviewWithdrawRequest(BaseModel):
+    revision: int = Field(ge=1)
+    taskId: str = Field(min_length=1, max_length=64)
+
+
+class ReviewReopenRequest(BaseModel):
+    revision: int = Field(ge=1)
+    branchId: Optional[str] = None
+
+
+class ReviewDecisionRequest(BaseModel):
+    reason: str = Field(default="", max_length=1000)
+
+
 ALLOWED_FILES = {
     ".pdf": {"application/pdf", "application/octet-stream"},
     ".docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/octet-stream"},
@@ -191,6 +211,7 @@ def create_app(
     active_settings = settings or Settings.from_environment()
     database = Database(active_settings.database_path)
     content_repository = ContentRepository(database)
+    review_repository = ReviewRepository(database)
     provider = ai_provider or DeepSeekProvider()
     visual_provider = image_provider or QwenImageProvider(max_download_bytes=active_settings.max_visual_bytes)
     upload_root = active_settings.upload_dir
@@ -226,6 +247,18 @@ def create_app(
                 raise ApiError(403, "PERMISSION_DENIED", f"缺少权限：{permission}")
             return user
         return dependency
+
+    def ensure_review_permission(user: dict[str, Any], task: dict[str, Any]) -> None:
+        permission = "review.product" if task["stage"] == "product" else "review.compliance"
+        if permission not in user["permissions"]:
+            database.audit(user["id"], "permission.denied", "permission", permission, f"拒绝访问：缺少 {permission}")
+            raise ApiError(403, "PERMISSION_DENIED", f"缺少权限：{permission}")
+
+    async def reviewer(user: dict[str, Any] = Depends(actor)) -> dict[str, Any]:
+        if not {"review.product", "review.compliance"}.intersection(user["permissions"]):
+            database.audit(user["id"], "permission.denied", "permission", "review.view", "拒绝访问审核中心")
+            raise ApiError(403, "PERMISSION_DENIED", "缺少审核权限")
+        return user
 
     def editable_product(product_id: str) -> dict[str, Any]:
         product = database.get_product(product_id)
@@ -448,6 +481,7 @@ def create_app(
             if code == "node_locked": raise ApiError(409, "CONTENT_NODE_LOCKED", "节点已确认，不能重新生成") from exc
             if code == "outline_not_confirmed": raise ApiError(422, "OUTLINE_NOT_CONFIRMED", "请先确认框架") from exc
             if code == "copy_not_confirmed": raise ApiError(422, "IMAGE_COPY_NOT_CONFIRMED", "请先确认图片文案") from exc
+            if code == "review_locked": raise ApiError(409, "CONTENT_REVIEW_LOCKED", "内容已提交审核，当前版本不可修改") from exc
             raise
 
     @app.post("/api/v1/jobs/{job_id}/run")
@@ -465,6 +499,7 @@ def create_app(
         except ValueError as exc:
             if str(exc) == "missing": raise ApiError(404, "JOB_NOT_FOUND", "生成任务不存在") from exc
             if str(exc) == "node_locked": raise ApiError(409, "CONTENT_NODE_LOCKED", "节点已确认，不能执行历史任务") from exc
+            if str(exc) == "review_locked": raise ApiError(409, "CONTENT_REVIEW_LOCKED", "内容已提交审核，当前版本不可生成") from exc
             raise ApiError(409, "JOB_STATE_CONFLICT", "当前任务状态不能执行") from exc
 
     @app.post("/api/v1/jobs/{job_id}/retry")
@@ -482,6 +517,7 @@ def create_app(
         except ValueError as exc:
             if str(exc) == "missing": raise ApiError(404, "JOB_NOT_FOUND", "生成任务不存在") from exc
             if str(exc) == "node_locked": raise ApiError(409, "CONTENT_NODE_LOCKED", "节点已确认，不能重试历史任务") from exc
+            if str(exc) == "review_locked": raise ApiError(409, "CONTENT_REVIEW_LOCKED", "内容已提交审核，历史任务不能重试") from exc
             raise ApiError(409, "JOB_STATE_CONFLICT", "仅失败或已取消任务可重试") from exc
 
     @app.get("/api/v1/jobs/{job_id}")
@@ -501,7 +537,7 @@ def create_app(
 
     @app.post("/api/v1/contents/{content_id}/confirm")
     def confirm_content_node(content_id: str, payload: ContentConfirmRequest, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
-        allowed = {"copy", "outline", "script"}
+        allowed = {"copy", "outline", "body", "script"}
         if payload.node not in allowed:
             raise ApiError(422, "CONTENT_NODE_INVALID", "不支持的确认节点")
         try:
@@ -510,6 +546,7 @@ def create_app(
             code = str(exc)
             if code == "missing": raise ApiError(404, "CONTENT_NOT_FOUND", "内容或渠道分支不存在") from exc
             if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "内容已更新，请刷新后重试") from exc
+            if code == "review_locked": raise ApiError(409, "CONTENT_REVIEW_LOCKED", "内容已提交审核，当前版本不可确认") from exc
             raise ApiError(422, "CONTENT_NODE_INCOMPLETE", "当前节点没有可确认内容") from exc
 
     @app.post("/api/v1/contents/{content_id}/unlock-copy")
@@ -521,6 +558,7 @@ def create_app(
             if code == "missing": raise ApiError(404, "CONTENT_NOT_FOUND", "内容草稿不存在") from exc
             if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "内容已更新，请刷新后重试") from exc
             if code == "invalid_task": raise ApiError(422, "CONTENT_TYPE_INVALID", "仅图片项目支持解锁图片文案") from exc
+            if code == "review_locked": raise ApiError(409, "CONTENT_REVIEW_LOCKED", "内容已提交审核，请先撤回或等待审核结果") from exc
             raise ApiError(409, "CONTENT_STATE_CONFLICT", "图片文案当前不需要解锁") from exc
 
     @app.post("/api/v1/contents/{content_id}/unlock-script")
@@ -532,6 +570,7 @@ def create_app(
             if code == "missing": raise ApiError(404, "CONTENT_NOT_FOUND", "内容草稿不存在") from exc
             if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "内容已更新，请刷新后重试") from exc
             if code == "invalid_task": raise ApiError(422, "CONTENT_TYPE_INVALID", "仅培训项目支持解锁讲稿") from exc
+            if code == "review_locked": raise ApiError(409, "CONTENT_REVIEW_LOCKED", "内容已提交审核，请先撤回或等待审核结果") from exc
             raise ApiError(409, "CONTENT_STATE_CONFLICT", "培训讲稿当前不需要解锁") from exc
 
     @app.patch("/api/v1/contents/{content_id}/training-session")
@@ -587,6 +626,7 @@ def create_app(
             if code == "invalid_task": raise ApiError(422, "AI_TASK_UNSUPPORTED", "内容节点与项目类型不匹配") from exc
             if code == "node_locked": raise ApiError(409, "CONTENT_NODE_LOCKED", "节点已确认，不能覆盖") from exc
             if code == "outline_not_confirmed": raise ApiError(422, "OUTLINE_NOT_CONFIRMED", "请先确认框架") from exc
+            if code == "review_locked": raise ApiError(409, "CONTENT_REVIEW_LOCKED", "内容已提交审核，当前版本不可修改") from exc
             raise ApiError(422, "MANUAL_OUTPUT_INVALID", "人工内容结构不完整，请核对必填字段") from exc
 
     @app.post("/api/v1/contents/{content_id}/visual-assets")
@@ -638,6 +678,7 @@ def create_app(
             if code == "missing": raise ApiError(404, "CONTENT_NOT_FOUND", "内容草稿不存在") from exc
             if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "内容已更新，请刷新后重试") from exc
             if code == "copy_not_confirmed": raise ApiError(422, "IMAGE_COPY_NOT_CONFIRMED", "请先确认图片文案") from exc
+            if code == "review_locked": raise ApiError(409, "CONTENT_REVIEW_LOCKED", "内容已提交审核，不能替换视觉素材") from exc
             raise ApiError(422, "VISUAL_UPLOAD_INVALID", "当前内容不能保存替换图") from exc
 
     @app.patch("/api/v1/contents/{content_id}/visual-layout")
@@ -653,7 +694,108 @@ def create_app(
             if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "内容已更新，请刷新后重试") from exc
             if code == "visual_missing": raise ApiError(422, "VISUAL_NOT_READY", "请先生成或上传视觉素材") from exc
             if code == "required_block": raise ApiError(422, "VISUAL_REQUIRED_BLOCK", "标题、产品主体和免责声明不可隐藏") from exc
+            if code == "review_locked": raise ApiError(409, "CONTENT_REVIEW_LOCKED", "内容已提交审核，不能修改图片布局") from exc
             raise ApiError(422, "VISUAL_LAYOUT_INVALID", "图片区块顺序或显隐设置无效") from exc
+
+    @app.post("/api/v1/contents/{content_id}/submit-review", status_code=201)
+    def submit_content_review(content_id: str, payload: ReviewSubmitRequest, request: Request, user: dict[str, Any] = Depends(require("content.submit"))) -> dict[str, Any]:
+        idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+        if not idempotency_key or len(idempotency_key) > 100:
+            raise ApiError(422, "IDEMPOTENCY_KEY_REQUIRED", "提交审核必须提供有效幂等键")
+        try:
+            return review_repository.submit(user["id"], content_id, payload.revision, payload.branchId, idempotency_key)
+        except ValueError as exc:
+            code = str(exc)
+            if code == "missing": raise ApiError(404, "CONTENT_NOT_FOUND", "内容或渠道分支不存在") from exc
+            if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "内容已更新，请刷新后重试") from exc
+            if code in {"branch_required", "branch_invalid"}: raise ApiError(422, "REVIEW_TARGET_INVALID", "文章必须按渠道分支提交，其他类型不能指定渠道") from exc
+            if code == "jobs_active": raise ApiError(409, "CONTENT_JOBS_ACTIVE", "仍有生成任务运行中，请完成或取消后再提交") from exc
+            if code == "incomplete": raise ApiError(422, "CONTENT_REVIEW_INCOMPLETE", "关键内容尚未确认或视觉素材未准备完成") from exc
+            raise ApiError(409, "CONTENT_REVIEW_STATE_CONFLICT", "当前内容状态不能重复提交") from exc
+
+    @app.post("/api/v1/contents/{content_id}/withdraw-review")
+    def withdraw_content_review(content_id: str, payload: ReviewWithdrawRequest, user: dict[str, Any] = Depends(require("content.submit"))) -> dict[str, Any]:
+        try:
+            review_repository.withdraw(user["id"], content_id, payload.taskId, payload.revision)
+            item = content_repository.get_item(content_id)
+            assert item is not None
+            return item
+        except ValueError as exc:
+            code = str(exc)
+            if code == "missing": raise ApiError(404, "REVIEW_TASK_NOT_FOUND", "审核任务或内容不存在") from exc
+            if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "内容已更新，请刷新后重试") from exc
+            raise ApiError(409, "REVIEW_WITHDRAW_FORBIDDEN", "仅未开始的产品审核可以撤回") from exc
+
+    @app.post("/api/v1/contents/{content_id}/reopen-review")
+    def reopen_rejected_content(content_id: str, payload: ReviewReopenRequest, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
+        try:
+            review_repository.reopen(user["id"], content_id, payload.revision, payload.branchId)
+            item = content_repository.get_item(content_id)
+            assert item is not None
+            return item
+        except ValueError as exc:
+            code = str(exc)
+            if code == "missing": raise ApiError(404, "CONTENT_NOT_FOUND", "内容或渠道分支不存在") from exc
+            if code == "conflict": raise ApiError(409, "REVISION_CONFLICT", "内容已更新，请刷新后重试") from exc
+            if code in {"branch_required", "branch_invalid"}: raise ApiError(422, "REVIEW_TARGET_INVALID", "返回修改目标无效") from exc
+            raise ApiError(409, "CONTENT_REVIEW_STATE_CONFLICT", "仅被驳回内容可以返回修改") from exc
+
+    @app.get("/api/v1/reviews")
+    def list_reviews(stage: str = Query(default="", max_length=20), status: str = Query(default="", max_length=30), user: dict[str, Any] = Depends(reviewer)) -> dict[str, Any]:
+        if stage and stage not in REVIEW_STAGES:
+            raise ApiError(422, "REVIEW_STAGE_INVALID", "审核阶段无效")
+        allowed_statuses = {"pending", "in_progress", "approved", "rejected", "cancelled"}
+        if status and status not in allowed_statuses:
+            raise ApiError(422, "REVIEW_STATUS_INVALID", "审核状态无效")
+        allowed_stages = {value for value, permission in (("product", "review.product"), ("compliance", "review.compliance")) if permission in user["permissions"]}
+        if stage and stage not in allowed_stages:
+            database.audit(user["id"], "permission.denied", "permission", f"review.{stage}", f"拒绝查看 {stage} 审核任务")
+            raise ApiError(403, "PERMISSION_DENIED", "缺少对应阶段审核权限")
+        effective_stage = stage or (next(iter(allowed_stages)) if len(allowed_stages) == 1 else "")
+        items = review_repository.list_tasks(stage=effective_stage, status=status)
+        return {"items": items, "total": len(items)}
+
+    @app.get("/api/v1/reviews/{task_id}")
+    def get_review(task_id: str, user: dict[str, Any] = Depends(reviewer)) -> dict[str, Any]:
+        task = review_repository.get_task(task_id)
+        if task is None:
+            raise ApiError(404, "REVIEW_TASK_NOT_FOUND", "审核任务不存在")
+        ensure_review_permission(user, task)
+        return task
+
+    @app.post("/api/v1/reviews/{task_id}/start")
+    def start_review(task_id: str, user: dict[str, Any] = Depends(reviewer)) -> dict[str, Any]:
+        task = review_repository.get_task(task_id)
+        if task is None:
+            raise ApiError(404, "REVIEW_TASK_NOT_FOUND", "审核任务不存在")
+        ensure_review_permission(user, task)
+        try:
+            return review_repository.start(user["id"], task_id)
+        except ValueError as exc:
+            raise ApiError(409, "REVIEW_STATE_CONFLICT", "审核任务当前不能开始") from exc
+
+    def decide_review(task_id: str, decision: str, payload: ReviewDecisionRequest, request: Request, user: dict[str, Any]) -> dict[str, Any]:
+        task = review_repository.get_task(task_id)
+        if task is None:
+            raise ApiError(404, "REVIEW_TASK_NOT_FOUND", "审核任务不存在")
+        ensure_review_permission(user, task)
+        idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+        if not idempotency_key or len(idempotency_key) > 100:
+            raise ApiError(422, "IDEMPOTENCY_KEY_REQUIRED", "审核决定必须提供有效幂等键")
+        try:
+            return review_repository.decide(user["id"], task_id, decision, payload.reason, idempotency_key)
+        except ValueError as exc:
+            code = str(exc)
+            if code == "reason_required": raise ApiError(422, "REVIEW_REASON_REQUIRED", "驳回必须填写原因") from exc
+            raise ApiError(409, "REVIEW_STATE_CONFLICT", "审核任务已经处理或当前状态不可操作") from exc
+
+    @app.post("/api/v1/reviews/{task_id}/approve")
+    def approve_review(task_id: str, payload: ReviewDecisionRequest, request: Request, user: dict[str, Any] = Depends(reviewer)) -> dict[str, Any]:
+        return decide_review(task_id, "approve", payload, request, user)
+
+    @app.post("/api/v1/reviews/{task_id}/reject")
+    def reject_review(task_id: str, payload: ReviewDecisionRequest, request: Request, user: dict[str, Any] = Depends(reviewer)) -> dict[str, Any]:
+        return decide_review(task_id, "reject", payload, request, user)
 
     @app.get("/api/v1/visual-assets/{asset_id}/preview", response_model=None)
     def preview_visual_asset(asset_id: str, _: dict[str, Any] = Depends(require("asset.view"))) -> FileResponse:

@@ -338,9 +338,19 @@ class ContentRepository:
             branches = [self._branch(item) for item in connection.execute("SELECT * FROM content_branches WHERE content_id = ? ORDER BY channel", (content_id,)).fetchall()]
             jobs = [self._job(item) for item in connection.execute("SELECT * FROM generation_jobs WHERE content_id = ? ORDER BY created_at DESC", (content_id,)).fetchall()]
             training_session = connection.execute("SELECT * FROM training_sessions WHERE content_id = ?", (content_id,)).fetchone() if row["type"] == "training" else None
+            reviews = [self._review(item) for item in connection.execute(
+                """SELECT task.*, version.version_no,
+                          (SELECT reason FROM review_records record
+                           WHERE record.task_id = task.id AND record.decision = 'reject'
+                           ORDER BY record.created_at DESC, record.id DESC LIMIT 1) AS last_reason
+                   FROM review_tasks task
+                   JOIN content_versions version ON version.id = task.content_version_id
+                   WHERE task.content_id = ? ORDER BY task.created_at DESC""",
+                (content_id,),
+            ).fetchall()]
         item = self._summary(row)
         payload = json.loads(row["payload_json"])
-        item.update({"manualSource": row["manual_source"], "settings": json.loads(row["settings_json"]), "payload": payload, "branches": branches, "jobs": jobs, "ownerId": row["owner_id"]})
+        item.update({"manualSource": row["manual_source"], "settings": json.loads(row["settings_json"]), "payload": payload, "branches": branches, "jobs": jobs, "reviews": reviews, "ownerId": row["owner_id"]})
         if row["type"] == "training":
             fallback_status = "ready" if payload.get("scriptStatus") == "confirmed" else "locked"
             item["trainingSession"] = self._training_session(training_session, fallback_status)
@@ -556,6 +566,8 @@ class ContentRepository:
                     raise ValueError("invalid_task")
                 if item["revision"] != revision:
                     raise ValueError("conflict")
+                if item["status"] != "draft":
+                    raise ValueError("review_locked")
                 payload = json.loads(item["payload_json"])
                 if payload.get("copyStatus") != "confirmed":
                     raise ValueError("copy_not_confirmed")
@@ -599,6 +611,8 @@ class ContentRepository:
                 raise ValueError("invalid_task")
             if item["revision"] != revision:
                 raise ValueError("conflict")
+            if item["status"] != "draft":
+                raise ValueError("review_locked")
             payload = json.loads(item["payload_json"])
             visual = payload.get("visual")
             if not isinstance(visual, dict) or not isinstance(visual.get("layout"), dict):
@@ -693,10 +707,14 @@ class ContentRepository:
             if branch_id:
                 branch = connection.execute("SELECT * FROM content_branches WHERE id = ? AND content_id = ?", (branch_id, content_id)).fetchone()
                 if branch is None: raise ValueError("missing")
+                if branch["review_status"] != "draft": raise ValueError("review_locked")
                 if node == "outline" and json.loads(branch["outline_json"]):
                     connection.execute("UPDATE content_branches SET outline_status = 'confirmed', updated_at = ? WHERE id = ?", (timestamp, branch_id))
+                elif node == "body" and branch["outline_status"] == "confirmed" and json.loads(branch["body_json"]):
+                    connection.execute("UPDATE content_branches SET body_status = 'confirmed', updated_at = ? WHERE id = ?", (timestamp, branch_id))
                 else: raise ValueError("incomplete")
             else:
+                if item["status"] != "draft": raise ValueError("review_locked")
                 payload = json.loads(item["payload_json"])
                 key = "copyStatus" if node == "copy" else f"{node}Status"
                 value_key = "copy" if node == "copy" else node
@@ -732,6 +750,8 @@ class ContentRepository:
                 raise ValueError("invalid_task")
             if item["revision"] != revision:
                 raise ValueError("conflict")
+            if item["status"] != "draft":
+                raise ValueError("review_locked")
             payload = json.loads(item["payload_json"])
             if payload.get("copyStatus") != "confirmed":
                 raise ValueError("state")
@@ -757,6 +777,8 @@ class ContentRepository:
                 raise ValueError("invalid_task")
             if item["revision"] != revision:
                 raise ValueError("conflict")
+            if item["status"] != "draft":
+                raise ValueError("review_locked")
             payload = json.loads(item["payload_json"])
             if payload.get("scriptStatus") != "confirmed":
                 raise ValueError("state")
@@ -958,6 +980,11 @@ class ContentRepository:
 
     @staticmethod
     def _ensure_task_unlocked(item: Any, branch: Any, task_type: str) -> None:
+        if branch is not None:
+            if branch["review_status"] != "draft":
+                raise ValueError("review_locked")
+        elif item["status"] != "draft":
+            raise ValueError("review_locked")
         if task_type == "image_copy":
             payload = json.loads(item["payload_json"])
             if payload.get("copyStatus") == "confirmed":
@@ -967,6 +994,8 @@ class ContentRepository:
             if payload.get("copyStatus") != "confirmed" or not payload.get("copy"):
                 raise ValueError("copy_not_confirmed")
         if task_type == "article_outline" and branch and branch["outline_status"] == "confirmed":
+            raise ValueError("node_locked")
+        if task_type == "article_generate" and branch and branch["body_status"] == "confirmed":
             raise ValueError("node_locked")
         if task_type in {"training_outline", "training_script"}:
             payload = json.loads(item["payload_json"])
@@ -995,7 +1024,11 @@ class ContentRepository:
 
     @staticmethod
     def _branch(row: Any) -> dict[str, Any]:
-        return {"id": row["id"], "channel": row["channel"], "outline": json.loads(row["outline_json"]), "outlineStatus": row["outline_status"], "body": json.loads(row["body_json"]), "bodyStatus": row["body_status"], "updatedAt": row["updated_at"]}
+        return {"id": row["id"], "channel": row["channel"], "outline": json.loads(row["outline_json"]), "outlineStatus": row["outline_status"], "body": json.loads(row["body_json"]), "bodyStatus": row["body_status"], "reviewStatus": row["review_status"], "updatedAt": row["updated_at"]}
+
+    @staticmethod
+    def _review(row: Any) -> dict[str, Any]:
+        return {"id": row["id"], "branchId": row["branch_id"], "contentVersion": row["version_no"], "stage": row["stage"], "status": row["status"], "startedAt": row["started_at"], "completedAt": row["completed_at"], "createdAt": row["created_at"], "updatedAt": row["updated_at"], "lastReason": row["last_reason"] or ""}
 
     @staticmethod
     def _job(row: Any) -> dict[str, Any]:
