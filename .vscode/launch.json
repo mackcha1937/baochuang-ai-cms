@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "保创AI：启动本地服务",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/server.py",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "PYTHONPYCACHEPREFIX": "${workspaceFolder}/.cache/pyc"
+      },
+      "justMyCode": true
+    }
+  ]
+}

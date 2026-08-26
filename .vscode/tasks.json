@@ -1,0 +1,31 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "自检：Python语法",
+      "type": "shell",
+      "command": "python3",
+      "args": ["-m", "py_compile", "server.py"],
+      "options": {
+        "env": {
+          "PYTHONPYCACHEPREFIX": "${workspaceFolder}/.cache/pyc"
+        }
+      },
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "运行：本地服务",
+      "type": "shell",
+      "command": "python3",
+      "args": ["server.py"],
+      "options": {
+        "env": {
+          "PYTHONPYCACHEPREFIX": "${workspaceFolder}/.cache/pyc"
+        }
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ]
+}
