@@ -7,6 +7,21 @@ export interface Brand {
   tone: string;
   slogan: string;
   disclaimer: string;
+  revision?: number;
+  updatedAt?: string;
+  assets?: BrandAsset[];
+}
+
+export interface BrandAsset {
+  id: string;
+  kind: "logo" | "image" | "article";
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  width: number | null;
+  height: number | null;
+  previewText: string;
+  createdAt: string;
 }
 
 export interface DemoUser {

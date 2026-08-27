@@ -13,7 +13,7 @@ export const navigationItems: NavigationItem[] = [
   { path: "/create/training", label: "AI动画培训", shortLabel: "课", description: "生成平台内互动培训课程" },
   { path: "/reviews", label: "审核中心", shortLabel: "审", description: "处理产品与合规审核任务" },
   { path: "/assets", label: "素材库", shortLabel: "材", description: "管理批准、过期与失效素材" },
-  { path: "/brand", label: "品牌设置", shortLabel: "牌", description: "查看企业品牌与内容基调" },
+  { path: "/brand", label: "品牌设置", shortLabel: "牌", description: "管理企业品牌、视觉与内容基调" },
   { path: "/permissions", label: "用户与权限", shortLabel: "权", description: "查看演示用户角色和权限" },
   { path: "/audit", label: "操作记录", shortLabel: "记", description: "追踪关键数据变化" },
 ];

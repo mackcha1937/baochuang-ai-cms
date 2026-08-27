@@ -73,3 +73,9 @@ export function uploadVisualFile(contentId: string, revision: number, file: File
   form.append("file", file);
   return apiRequest(`/contents/${encodeURIComponent(contentId)}/visual-assets?revision=${revision}`, { method: "POST", body: form }, 120_000);
 }
+
+export function uploadBrandAsset(kind: "logo" | "image" | "article", revision: number, file: File): Promise<unknown> {
+  const form = new FormData();
+  form.append("file", file);
+  return apiRequest(`/brand/assets?kind=${encodeURIComponent(kind)}&revision=${revision}`, { method: "POST", body: form }, 120_000);
+}

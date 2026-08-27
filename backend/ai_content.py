@@ -961,7 +961,19 @@ class ContentRepository:
             facts = [dict(row) for row in connection.execute("SELECT label, value FROM product_facts WHERE product_id = ? AND confirmed = 1 ORDER BY position", (item["product_id"],)).fetchall()]
             features = [row[0] for row in connection.execute("SELECT value FROM product_features WHERE product_id = ? ORDER BY position", (item["product_id"],)).fetchall()]
             product = {"name": product_row["name"], "insurer": product_row["insurer"], "category": product_row["category"], "summary": product_row["summary"], "features": features, "facts": facts}
-        snapshot: dict[str, Any] = {"taskType": task_type, "product": product, "manualSource": item["manual_source"], "settings": json.loads(item["settings_json"]), "instruction": instruction}
+        brand_row = connection.execute(
+            "SELECT company_name, product_name, primary_color, secondary_color, tone, slogan, disclaimer, revision FROM brands LIMIT 1"
+        ).fetchone()
+        brand = {
+            "companyName": brand_row["company_name"], "productName": brand_row["product_name"],
+            "primaryColor": brand_row["primary_color"], "secondaryColor": brand_row["secondary_color"],
+            "tone": brand_row["tone"], "slogan": brand_row["slogan"], "disclaimer": brand_row["disclaimer"],
+            "revision": brand_row["revision"],
+        } if brand_row else None
+        snapshot: dict[str, Any] = {
+            "taskType": task_type, "product": product, "brand": brand,
+            "manualSource": item["manual_source"], "settings": json.loads(item["settings_json"]), "instruction": instruction,
+        }
         payload = json.loads(item["payload_json"])
         if task_type == "image_copy" and payload.get("copy"): snapshot["currentCopy"] = payload["copy"]
         if task_type == "image_visual":

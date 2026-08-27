@@ -13,7 +13,18 @@ from backend.seed import BRAND, DEMO_USER, PERMISSIONS, PRODUCT, VIEWER_USER
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
-CREATE TABLE IF NOT EXISTS brands (id TEXT PRIMARY KEY, company_name TEXT NOT NULL, product_name TEXT NOT NULL, primary_color TEXT NOT NULL, secondary_color TEXT NOT NULL, tone TEXT NOT NULL, slogan TEXT NOT NULL, disclaimer TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS brands (
+    id TEXT PRIMARY KEY, company_name TEXT NOT NULL, product_name TEXT NOT NULL,
+    primary_color TEXT NOT NULL, secondary_color TEXT NOT NULL, tone TEXT NOT NULL,
+    slogan TEXT NOT NULL, disclaimer TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS brand_assets (
+    id TEXT PRIMARY KEY, brand_id TEXT NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL, original_name TEXT NOT NULL, storage_key TEXT NOT NULL UNIQUE,
+    mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, checksum TEXT NOT NULL,
+    width INTEGER, height INTEGER, preview_text TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL, mode TEXT NOT NULL, roles_json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS user_permissions (user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, permission_code TEXT NOT NULL, PRIMARY KEY (user_id, permission_code));
 CREATE TABLE IF NOT EXISTS products (
@@ -117,6 +128,7 @@ CREATE INDEX IF NOT EXISTS idx_content_versions_content ON content_versions(cont
 CREATE INDEX IF NOT EXISTS idx_review_tasks_status ON review_tasks(status, stage, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_review_records_task ON review_records(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_assets_filter ON assets(status, type, channel, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_brand_assets_kind ON brand_assets(brand_id, kind, created_at DESC);
 """
 
 DEFAULT_FACTS = ["投保年龄", "保障期间", "等待期", "缴费期间"]
@@ -154,6 +166,7 @@ class Database:
             self._migrate_stage06(connection)
             self._migrate_stage07(connection)
             self._migrate_stage08(connection)
+            self._migrate_stage09(connection)
             self._seed(connection)
 
     @staticmethod
@@ -221,10 +234,21 @@ class Database:
         connection.execute("UPDATE products SET root_product_id = id WHERE root_product_id = ''")
 
     @staticmethod
+    def _migrate_stage09(connection: sqlite3.Connection) -> None:
+        brand_columns = {row[1] for row in connection.execute("PRAGMA table_info(brands)")}
+        if "revision" not in brand_columns:
+            connection.execute("ALTER TABLE brands ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
+        if "updated_at" not in brand_columns:
+            connection.execute("ALTER TABLE brands ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
+        connection.execute("UPDATE brands SET updated_at = ? WHERE updated_at = ''", (now_iso(),))
+
+    @staticmethod
     def _seed(connection: sqlite3.Connection) -> None:
         connection.execute(
-            "INSERT OR IGNORE INTO brands VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (BRAND["id"], BRAND["companyName"], BRAND["productName"], BRAND["primaryColor"], BRAND["secondaryColor"], BRAND["tone"], BRAND["slogan"], BRAND["disclaimer"]),
+            """INSERT OR IGNORE INTO brands
+               (id, company_name, product_name, primary_color, secondary_color, tone, slogan, disclaimer, revision, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+            (BRAND["id"], BRAND["companyName"], BRAND["productName"], BRAND["primaryColor"], BRAND["secondaryColor"], BRAND["tone"], BRAND["slogan"], BRAND["disclaimer"], now_iso()),
         )
         for user in (DEMO_USER, VIEWER_USER):
             connection.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?)", (user["id"], user["name"], user["mode"], json.dumps(user["roles"], ensure_ascii=False)))
@@ -256,8 +280,100 @@ class Database:
     def get_brand(self) -> dict[str, Any]:
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM brands LIMIT 1").fetchone()
+            assets = connection.execute("SELECT * FROM brand_assets WHERE brand_id = ? ORDER BY created_at, id", (row["id"],)).fetchall() if row else []
         assert row is not None
-        return {"id": row["id"], "companyName": row["company_name"], "productName": row["product_name"], "primaryColor": row["primary_color"], "secondaryColor": row["secondary_color"], "tone": row["tone"], "slogan": row["slogan"], "disclaimer": row["disclaimer"]}
+        return {
+            "id": row["id"], "companyName": row["company_name"], "productName": row["product_name"],
+            "primaryColor": row["primary_color"], "secondaryColor": row["secondary_color"],
+            "tone": row["tone"], "slogan": row["slogan"], "disclaimer": row["disclaimer"],
+            "revision": row["revision"], "updatedAt": row["updated_at"],
+            "assets": [self._brand_asset_dict(item) for item in assets],
+        }
+
+    @staticmethod
+    def _brand_asset_dict(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"], "kind": row["kind"], "name": row["original_name"],
+            "mimeType": row["mime_type"], "sizeBytes": row["size_bytes"],
+            "width": row["width"], "height": row["height"], "previewText": row["preview_text"],
+            "createdAt": row["created_at"],
+        }
+
+    def update_brand(self, actor_id: str, revision: int, values: dict[str, str]) -> str:
+        with self.connect() as connection:
+            row = connection.execute("SELECT id, revision FROM brands LIMIT 1").fetchone()
+            if row is None:
+                return "missing"
+            if row["revision"] != revision:
+                return "conflict"
+            updated_at = now_iso()
+            connection.execute(
+                """UPDATE brands SET company_name = ?, product_name = ?, primary_color = ?, secondary_color = ?,
+                   tone = ?, slogan = ?, disclaimer = ?, revision = revision + 1, updated_at = ? WHERE id = ?""",
+                (values["companyName"], values["productName"], values["primaryColor"], values["secondaryColor"], values["tone"], values["slogan"], values["disclaimer"], updated_at, row["id"]),
+            )
+            self._audit(connection, actor_id, "brand.update", "brand", row["id"], f"更新品牌设置，修订 {revision + 1}")
+        return "updated"
+
+    def add_brand_asset(self, actor_id: str, revision: int, asset: dict[str, Any]) -> str:
+        limits = {"logo": 1, "image": 3, "article": 3}
+        with self.connect() as connection:
+            brand = connection.execute("SELECT id, revision FROM brands LIMIT 1").fetchone()
+            if brand is None:
+                return "missing"
+            if brand["revision"] != revision:
+                return "conflict"
+            if asset["kind"] not in limits:
+                return "kind"
+            count = connection.execute("SELECT COUNT(*) FROM brand_assets WHERE brand_id = ? AND kind = ?", (brand["id"], asset["kind"])).fetchone()[0]
+            if count >= limits[asset["kind"]]:
+                return "limit"
+            connection.execute(
+                """INSERT INTO brand_assets
+                   (id, brand_id, kind, original_name, storage_key, mime_type, size_bytes, checksum, width, height, preview_text, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (asset["id"], brand["id"], asset["kind"], asset["original_name"], asset["storage_key"], asset["mime_type"], asset["size_bytes"], asset["checksum"], asset.get("width"), asset.get("height"), asset.get("preview_text", ""), now_iso()),
+            )
+            connection.execute("UPDATE brands SET revision = revision + 1, updated_at = ? WHERE id = ?", (now_iso(), brand["id"]))
+            self._audit(connection, actor_id, "brand.asset.upload", "brand_asset", asset["id"], f"上传{asset['kind']}参考素材：{asset['original_name']}")
+        return "created"
+
+    def get_brand_asset_storage_key(self, asset_id: str) -> Optional[str]:
+        with self.connect() as connection:
+            row = connection.execute("SELECT storage_key FROM brand_assets WHERE id = ?", (asset_id,)).fetchone()
+        return row["storage_key"] if row else None
+
+    def remove_brand_asset(self, actor_id: str, asset_id: str, revision: int) -> tuple[str, Optional[str]]:
+        with self.connect() as connection:
+            brand = connection.execute("SELECT id, revision FROM brands LIMIT 1").fetchone()
+            if brand is None:
+                return "missing", None
+            if brand["revision"] != revision:
+                return "conflict", None
+            asset = connection.execute("SELECT original_name, storage_key FROM brand_assets WHERE id = ? AND brand_id = ?", (asset_id, brand["id"])).fetchone()
+            if asset is None:
+                return "asset_missing", None
+            connection.execute("DELETE FROM brand_assets WHERE id = ?", (asset_id,))
+            connection.execute("UPDATE brands SET revision = revision + 1, updated_at = ? WHERE id = ?", (now_iso(), brand["id"]))
+            self._audit(connection, actor_id, "brand.asset.remove", "brand_asset", asset_id, f"移除品牌参考素材：{asset['original_name']}")
+            return "removed", asset["storage_key"]
+
+    def restore_brand_defaults(self, actor_id: str, revision: int) -> tuple[str, list[str]]:
+        with self.connect() as connection:
+            brand = connection.execute("SELECT id, revision FROM brands LIMIT 1").fetchone()
+            if brand is None:
+                return "missing", []
+            if brand["revision"] != revision:
+                return "conflict", []
+            keys = [item[0] for item in connection.execute("SELECT storage_key FROM brand_assets WHERE brand_id = ?", (brand["id"],)).fetchall()]
+            connection.execute("DELETE FROM brand_assets WHERE brand_id = ?", (brand["id"],))
+            connection.execute(
+                """UPDATE brands SET company_name = ?, product_name = ?, primary_color = ?, secondary_color = ?,
+                   tone = ?, slogan = ?, disclaimer = ?, revision = revision + 1, updated_at = ? WHERE id = ?""",
+                (BRAND["companyName"], BRAND["productName"], BRAND["primaryColor"], BRAND["secondaryColor"], BRAND["tone"], BRAND["slogan"], BRAND["disclaimer"], now_iso(), brand["id"]),
+            )
+            self._audit(connection, actor_id, "brand.restore_defaults", "brand", brand["id"], "恢复系统默认品牌设置，不修改历史内容")
+        return "restored", keys
 
     def get_user(self, user_id: str) -> Optional[dict[str, Any]]:
         with self.connect() as connection:

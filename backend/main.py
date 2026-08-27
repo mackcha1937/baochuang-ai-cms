@@ -90,6 +90,30 @@ class AssetReasonRequest(BaseModel):
         return value.strip()
 
 
+class BrandUpdateRequest(BaseModel):
+    companyName: str = Field(min_length=1, max_length=100)
+    productName: str = Field(min_length=1, max_length=100)
+    primaryColor: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
+    secondaryColor: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
+    tone: str = Field(min_length=1, max_length=500)
+    slogan: str = Field(min_length=1, max_length=300)
+    disclaimer: str = Field(min_length=1, max_length=2000)
+    revision: int = Field(ge=1)
+
+    @field_validator("companyName", "productName", "tone", "slogan", "disclaimer")
+    @classmethod
+    def clean_brand_text(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("品牌字段不能为空")
+        return cleaned
+
+    @field_validator("primaryColor", "secondaryColor")
+    @classmethod
+    def normalize_color(cls, value: str) -> str:
+        return value.upper()
+
+
 class ManualTextRequest(BaseModel):
     text: str = Field(max_length=500_000)
 
@@ -194,6 +218,17 @@ ALLOWED_FILES = {
     ".pdf": {"application/pdf", "application/octet-stream"},
     ".docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/octet-stream"},
     ".xlsx": {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/octet-stream"},
+}
+
+BRAND_IMAGE_FILES = {
+    ".png": {"image/png", "application/octet-stream"},
+    ".jpg": {"image/jpeg", "application/octet-stream"},
+    ".jpeg": {"image/jpeg", "application/octet-stream"},
+}
+BRAND_ARTICLE_FILES = {
+    ".pdf": ALLOWED_FILES[".pdf"],
+    ".docx": ALLOWED_FILES[".docx"],
+    ".txt": {"text/plain", "application/octet-stream"},
 }
 
 
@@ -313,6 +348,138 @@ def create_app(
     def products(q: str = Query(default="", max_length=100)) -> dict[str, Any]:
         items = database.list_products(q.strip())
         return {"items": items, "total": len(items), "query": q.strip()}
+
+    @app.get("/api/v1/brand")
+    def get_brand() -> dict[str, Any]:
+        return database.get_brand()
+
+    @app.patch("/api/v1/brand")
+    def update_brand(payload: BrandUpdateRequest, user: dict[str, Any] = Depends(require("brand.manage"))) -> dict[str, Any]:
+        result = database.update_brand(user["id"], payload.revision, payload.model_dump(exclude={"revision"}))
+        if result == "missing":
+            raise ApiError(404, "BRAND_NOT_FOUND", "品牌设置不存在")
+        if result == "conflict":
+            raise ApiError(409, "REVISION_CONFLICT", "品牌设置已在其他页面更新，请刷新后重试")
+        return database.get_brand()
+
+    @app.post("/api/v1/brand/assets", status_code=201)
+    async def upload_brand_asset(
+        kind: str,
+        revision: int = Query(ge=1),
+        file: UploadFile = File(...),
+        user: dict[str, Any] = Depends(require("brand.manage")),
+    ) -> dict[str, Any]:
+        if kind not in {"logo", "image", "article"}:
+            raise ApiError(422, "BRAND_ASSET_KIND_INVALID", "品牌素材类型无效")
+        display_name = safe_display_name(file.filename or "")
+        extension = Path(display_name).suffix.lower()
+        allowed = BRAND_ARTICLE_FILES if kind == "article" else BRAND_IMAGE_FILES
+        if extension not in allowed:
+            database.audit(user["id"], "brand.asset.rejected", "brand", "brand-demo", f"拒绝品牌素材 {display_name}：BRAND_FILE_TYPE_UNSUPPORTED")
+            message = "参考文章仅支持 PDF、DOCX、TXT" if kind == "article" else "Logo 和参考图仅支持 PNG、JPG、JPEG"
+            raise ApiError(415, "BRAND_FILE_TYPE_UNSUPPORTED", message)
+        supplied_mime = (file.content_type or "application/octet-stream").lower()
+        if supplied_mime not in allowed[extension]:
+            database.audit(user["id"], "brand.asset.rejected", "brand", "brand-demo", f"拒绝品牌素材 {display_name}：BRAND_MIME_MISMATCH")
+            raise ApiError(415, "BRAND_MIME_MISMATCH", "品牌素材 MIME 类型与扩展名不匹配")
+        asset_id, storage_key = uuid4().hex, f"brand_{uuid4().hex}{extension}"
+        path = storage_path(upload_root, storage_key)
+        limit = active_settings.max_upload_bytes if kind == "article" else active_settings.max_visual_bytes
+        size, digest = 0, hashlib.sha256()
+        try:
+            with path.open("xb") as target:
+                while chunk := await file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > limit:
+                        raise ApiError(413, "BRAND_FILE_TOO_LARGE", "品牌素材超过本地安全上限")
+                    digest.update(chunk)
+                    target.write(chunk)
+            if size == 0:
+                raise ApiError(422, "BRAND_FILE_EMPTY", "品牌素材不能为空")
+            width = height = None
+            preview_text = ""
+            if kind in {"logo", "image"}:
+                try:
+                    detected_mime, _, width, height = validate_raster(path.read_bytes())
+                except ValueError as exc:
+                    raise ApiError(422, "BRAND_IMAGE_INVALID", "图片内容无效或尺寸不安全") from exc
+                if supplied_mime != "application/octet-stream" and supplied_mime != detected_mime:
+                    raise ApiError(415, "BRAND_MIME_MISMATCH", "图片实际类型与声明不一致")
+                supplied_mime = detected_mime
+            elif extension == ".txt":
+                try:
+                    preview_text = path.read_text(encoding="utf-8")[:20_000].strip()
+                except UnicodeDecodeError as exc:
+                    raise ApiError(422, "BRAND_ARTICLE_INVALID", "TXT 参考文章必须为 UTF-8") from exc
+            else:
+                validate_file_signature(path, extension)
+                try:
+                    preview_text, _ = parse_document(path, extension)
+                except EmptyDocumentError as exc:
+                    raise ApiError(422, "BRAND_ARTICLE_EMPTY", "参考文章中未解析到文字") from exc
+                preview_text = preview_text[:20_000].strip()
+            if kind == "article" and not preview_text:
+                raise ApiError(422, "BRAND_ARTICLE_EMPTY", "参考文章中未解析到文字")
+            result = database.add_brand_asset(user["id"], revision, {
+                "id": asset_id, "kind": kind, "original_name": display_name, "storage_key": storage_key,
+                "mime_type": supplied_mime, "size_bytes": size, "checksum": digest.hexdigest(),
+                "width": width, "height": height, "preview_text": preview_text,
+            })
+            if result == "conflict":
+                raise ApiError(409, "REVISION_CONFLICT", "品牌设置已更新，请刷新后重试")
+            if result == "limit":
+                label = "Logo" if kind == "logo" else "参考图" if kind == "image" else "参考文章"
+                raise ApiError(409, "BRAND_ASSET_LIMIT", f"{label}已达数量上限")
+            if result != "created":
+                raise ApiError(422, "BRAND_ASSET_INVALID", "品牌素材无法保存")
+            return database.get_brand()
+        except Exception as exc:
+            if path.exists():
+                path.unlink()
+            if isinstance(exc, ApiError):
+                database.audit(user["id"], "brand.asset.rejected", "brand", "brand-demo", f"拒绝品牌素材 {display_name}：{exc.code}")
+            raise
+        finally:
+            await file.close()
+
+    @app.delete("/api/v1/brand/assets/{asset_id}")
+    def remove_brand_asset(asset_id: str, revision: int = Query(ge=1), user: dict[str, Any] = Depends(require("brand.manage"))) -> dict[str, Any]:
+        result, key = database.remove_brand_asset(user["id"], asset_id, revision)
+        if result == "conflict":
+            raise ApiError(409, "REVISION_CONFLICT", "品牌设置已更新，请刷新后重试")
+        if result != "removed" or key is None:
+            raise ApiError(404, "BRAND_ASSET_NOT_FOUND", "品牌素材不存在")
+        path = storage_path(upload_root, key)
+        if path.exists():
+            path.unlink()
+        return database.get_brand()
+
+    @app.post("/api/v1/brand/restore-defaults")
+    def restore_brand_defaults(payload: RevisionRequest, user: dict[str, Any] = Depends(require("brand.manage"))) -> dict[str, Any]:
+        result, keys = database.restore_brand_defaults(user["id"], payload.revision)
+        if result == "conflict":
+            raise ApiError(409, "REVISION_CONFLICT", "品牌设置已更新，请刷新后重试")
+        if result != "restored":
+            raise ApiError(404, "BRAND_NOT_FOUND", "品牌设置不存在")
+        for key in keys:
+            path = storage_path(upload_root, key)
+            if path.exists():
+                path.unlink()
+        return database.get_brand()
+
+    @app.get("/api/v1/brand/assets/{asset_id}/preview", response_model=None)
+    def preview_brand_asset(asset_id: str, _: dict[str, Any] = Depends(actor)) -> FileResponse:
+        key = database.get_brand_asset_storage_key(asset_id)
+        if key is None:
+            raise ApiError(404, "BRAND_ASSET_NOT_FOUND", "品牌素材不存在")
+        path = storage_path(upload_root, key)
+        if not path.is_file():
+            raise ApiError(404, "BRAND_FILE_MISSING", "品牌素材文件缺失")
+        brand = database.get_brand()
+        asset = next((item for item in brand["assets"] if item["id"] == asset_id), None)
+        if asset is None or asset["kind"] == "article":
+            raise ApiError(415, "BRAND_PREVIEW_UNSUPPORTED", "该品牌素材不支持图片预览")
+        return FileResponse(path, media_type=asset["mimeType"], headers={"Cache-Control": "private, max-age=60", "X-Content-Type-Options": "nosniff"})
 
     @app.post("/api/v1/products", status_code=201)
     def create_product(payload: ProductCreate, request: Request, user: dict[str, Any] = Depends(require("product.create"))) -> JSONResponse:

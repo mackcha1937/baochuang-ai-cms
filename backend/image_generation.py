@@ -90,6 +90,7 @@ def image_size_for(snapshot: dict[str, Any]) -> str:
 def visual_prompt(snapshot: dict[str, Any]) -> str:
     copy = snapshot.get("confirmedCopy") if isinstance(snapshot.get("confirmedCopy"), dict) else {}
     settings = snapshot.get("settings") if isinstance(snapshot.get("settings"), dict) else {}
+    brand = snapshot.get("brand") if isinstance(snapshot.get("brand"), dict) else {}
     selling_points = copy.get("sellingPoints") if isinstance(copy.get("sellingPoints"), list) else []
     blocks = copy.get("blocks") if isinstance(copy.get("blocks"), list) else []
     visual_topics = [str(item.get("text", "")) for item in blocks if isinstance(item, dict) and item.get("text")]
@@ -97,6 +98,7 @@ def visual_prompt(snapshot: dict[str, Any]) -> str:
         "生成一张专业、可信、现代的保险营销视觉背景素材。",
         f"成品类型：{settings.get('imageType', '宣传长图')}；受众：{settings.get('audience', '家庭用户')}；目的：{settings.get('purpose', '产品科普')}。",
         f"内容主题：{copy.get('title', '')}。视觉语义参考：{'；'.join(map(str, selling_points + visual_topics))[:1800]}。",
+        f"品牌基调：{brand.get('tone', '专业、亲切、克制')}；品牌主色 {brand.get('primaryColor', '#6D5EF7')}，辅助色 {brand.get('secondaryColor', '#19BFA1')}。",
         "只生成背景、人物或抽象插图，不要在图中绘制任何汉字、英文字母、数字、Logo、商标、二维码、表格、印章、水印或界面文字。",
         "为后续程序排版预留清晰留白：顶部标题区、中部信息卡片区、底部免责声明区；主体不要遮挡这些区域。",
         "人物如出现应为自然成年亚洲人，场景温暖稳重，避免医疗器械恐吓画面、夸张收益暗示和不当承诺。",
