@@ -52,6 +52,10 @@ CREATE TABLE IF NOT EXISTS source_documents (
 );
 CREATE TABLE IF NOT EXISTS idempotency_keys (actor_id TEXT NOT NULL, action TEXT NOT NULL, key TEXT NOT NULL, object_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (actor_id, action, key));
 CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at TEXT NOT NULL, actor_id TEXT NOT NULL, action TEXT NOT NULL, object_type TEXT NOT NULL, object_id TEXT NOT NULL, detail TEXT NOT NULL);
+CREATE TRIGGER IF NOT EXISTS audit_logs_no_update
+BEFORE UPDATE ON audit_logs BEGIN SELECT RAISE(ABORT, 'audit logs are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS audit_logs_no_delete
+BEFORE DELETE ON audit_logs BEGIN SELECT RAISE(ABORT, 'audit logs are immutable'); END;
 CREATE TABLE IF NOT EXISTS content_items (
     id TEXT PRIMARY KEY, type TEXT NOT NULL, title TEXT NOT NULL,
     product_id TEXT REFERENCES products(id), manual_source TEXT NOT NULL DEFAULT '',
@@ -388,6 +392,18 @@ class Database:
         assert user is not None
         return user
 
+    def list_users(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute("SELECT * FROM users ORDER BY id").fetchall()
+            permission_rows = connection.execute("SELECT user_id, permission_code FROM user_permissions ORDER BY permission_code").fetchall()
+        permissions: dict[str, list[str]] = {}
+        for item in permission_rows:
+            permissions.setdefault(item["user_id"], []).append(item["permission_code"])
+        return [
+            {"id": row["id"], "name": row["name"], "mode": row["mode"], "roles": json.loads(row["roles_json"]), "permissions": permissions.get(row["id"], [])}
+            for row in rows
+        ]
+
     def list_products(self, query: str = "") -> list[dict[str, Any]]:
         sql, params = "SELECT * FROM products WHERE status != '历史版本'", ()
         if query:
@@ -607,6 +623,47 @@ class Database:
     def get_recent_audit(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as connection: rows = connection.execute("SELECT * FROM audit_logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
+
+    def query_audit(
+        self,
+        *,
+        actor_id: str = "",
+        action: str = "",
+        object_type: str = "",
+        object_id: str = "",
+        occurred_from: str = "",
+        occurred_to: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        where: list[str] = []
+        params: list[Any] = []
+        for column, value in (("actor_id", actor_id), ("action", action), ("object_type", object_type), ("object_id", object_id)):
+            if value:
+                where.append(f"{column} = ?")
+                params.append(value)
+        if occurred_from:
+            where.append("julianday(occurred_at) >= julianday(?)")
+            params.append(occurred_from)
+        if occurred_to:
+            where.append("julianday(occurred_at) <= julianday(?)")
+            params.append(occurred_to)
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        with self.connect() as connection:
+            total = connection.execute(f"SELECT COUNT(*) FROM audit_logs{clause}", params).fetchone()[0]
+            rows = connection.execute(
+                f"SELECT * FROM audit_logs{clause} ORDER BY id DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+            actors = [item[0] for item in connection.execute("SELECT DISTINCT actor_id FROM audit_logs ORDER BY actor_id").fetchall()]
+            actions = [item[0] for item in connection.execute("SELECT DISTINCT action FROM audit_logs ORDER BY action").fetchall()]
+            object_types = [item[0] for item in connection.execute("SELECT DISTINCT object_type FROM audit_logs ORDER BY object_type").fetchall()]
+        return {"items": [dict(row) for row in rows], "total": total, "limit": limit, "offset": offset, "facets": {"actors": actors, "actions": actions, "objectTypes": object_types}}
+
+    def get_audit_item(self, audit_id: int) -> Optional[dict[str, Any]]:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM audit_logs WHERE id = ?", (audit_id,)).fetchone()
+        return dict(row) if row else None
 
     @staticmethod
     def _product_summary(row: sqlite3.Row) -> dict[str, Any]:

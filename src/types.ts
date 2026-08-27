@@ -49,6 +49,23 @@ export interface AuditItem {
   detail: string;
 }
 
+export interface AuditResponse {
+  items: AuditItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  facets: { actors: string[]; actions: string[]; objectTypes: string[] };
+}
+
+export interface PermissionMatrix {
+  currentUserId: string;
+  users: DemoUser[];
+  roles: { name: string; permissions: string[] }[];
+  permissions: { code: string; description: string }[];
+  mode: "local_demo";
+  mutable: false;
+}
+
 export interface BootstrapData {
   brand: Brand;
   user: DemoUser;

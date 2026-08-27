@@ -46,6 +46,32 @@ PERMISSIONS = [
     "audit.view",
 ]
 
+ROLE_PERMISSIONS: dict[str, list[str]] = {
+    "企业管理员": ["brand.manage", "asset.view", "asset.download", "asset.duplicate", "asset.invalidate", "user.manage", "audit.view"],
+    "内容创作者": ["product.create", "product.update", "content.create", "content.edit", "content.submit", "asset.view", "asset.download", "asset.duplicate"],
+    "产品审核员": ["product.confirm", "review.product", "asset.view"],
+    "合规审核员": ["review.compliance", "asset.view", "asset.invalidate"],
+    "只读访客": [],
+}
+
+PERMISSION_DESCRIPTIONS: dict[str, str] = {
+    "brand.manage": "管理品牌字段与参考素材",
+    "product.create": "创建产品草稿",
+    "product.update": "更新产品草稿与版本",
+    "product.confirm": "确认产品关键事实",
+    "content.create": "创建内容项目",
+    "content.edit": "编辑内容草稿",
+    "content.submit": "提交不可变内容版本",
+    "review.product": "执行产品审核",
+    "review.compliance": "执行合规审核",
+    "asset.view": "查看素材库",
+    "asset.download": "下载批准素材",
+    "asset.duplicate": "复制批准素材为草稿",
+    "asset.invalidate": "处置过期与失效素材",
+    "user.manage": "查看演示权限矩阵（正式版用于用户管理）",
+    "audit.view": "查看不可变操作记录",
+}
+
 PRODUCT: dict[str, Any] = {
     "id": "darwin-12",
     "name": "复星联合达尔文12号重大疾病保险（互联网）",

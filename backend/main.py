@@ -24,6 +24,7 @@ from backend.database import Database
 from backend.document_parser import EmptyDocumentError, parse_document
 from backend.image_generation import ImageProvider, QwenImageProvider, validate_raster
 from backend.review import REVIEW_STAGES, ReviewRepository
+from backend.seed import PERMISSION_DESCRIPTIONS, ROLE_PERMISSIONS
 
 
 class ApiError(Exception):
@@ -353,6 +354,17 @@ def create_app(
     def get_brand() -> dict[str, Any]:
         return database.get_brand()
 
+    @app.get("/api/v1/permissions")
+    def permission_matrix(user: dict[str, Any] = Depends(require("user.manage"))) -> dict[str, Any]:
+        return {
+            "currentUserId": user["id"],
+            "users": database.list_users(),
+            "roles": [{"name": name, "permissions": permissions} for name, permissions in ROLE_PERMISSIONS.items()],
+            "permissions": [{"code": code, "description": description} for code, description in PERMISSION_DESCRIPTIONS.items()],
+            "mode": "local_demo",
+            "mutable": False,
+        }
+
     @app.patch("/api/v1/brand")
     def update_brand(payload: BrandUpdateRequest, user: dict[str, Any] = Depends(require("brand.manage"))) -> dict[str, Any]:
         result = database.update_brand(user["id"], payload.revision, payload.model_dump(exclude={"revision"}))
@@ -643,9 +655,42 @@ def create_app(
         return Response(status_code=204)
 
     @app.get("/api/v1/audit-logs")
-    def audit_logs(user: dict[str, Any] = Depends(require("audit.view"))) -> dict[str, Any]:
-        items = database.get_recent_audit(100)
-        return {"items": items, "total": len(items)}
+    def audit_logs(
+        actorId: str = Query(default="", max_length=100),
+        action: str = Query(default="", max_length=100),
+        objectType: str = Query(default="", max_length=100),
+        objectId: str = Query(default="", max_length=200),
+        occurredFrom: str = Query(default="", max_length=40),
+        occurredTo: str = Query(default="", max_length=40),
+        limit: int = Query(default=100, ge=1, le=200),
+        offset: int = Query(default=0, ge=0, le=10_000),
+        user: dict[str, Any] = Depends(require("audit.view")),
+    ) -> dict[str, Any]:
+        parsed: dict[str, str] = {}
+        instants: dict[str, datetime] = {}
+        for key, value in (("occurredFrom", occurredFrom), ("occurredTo", occurredTo)):
+            if not value:
+                parsed[key] = ""
+                continue
+            try:
+                instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ApiError(422, "AUDIT_TIME_INVALID", "操作记录时间格式无效") from exc
+            parsed[key] = value
+            instants[key] = instant.astimezone()
+        if parsed["occurredFrom"] and parsed["occurredTo"] and instants["occurredFrom"] > instants["occurredTo"]:
+            raise ApiError(422, "AUDIT_TIME_RANGE_INVALID", "开始时间不得晚于结束时间")
+        return database.query_audit(
+            actor_id=actorId.strip(), action=action.strip(), object_type=objectType.strip(), object_id=objectId.strip(),
+            occurred_from=parsed["occurredFrom"], occurred_to=parsed["occurredTo"], limit=limit, offset=offset,
+        )
+
+    @app.get("/api/v1/audit-logs/{audit_id}")
+    def audit_log_detail(audit_id: int, _: dict[str, Any] = Depends(require("audit.view"))) -> dict[str, Any]:
+        item = database.get_audit_item(audit_id)
+        if item is None:
+            raise ApiError(404, "AUDIT_LOG_NOT_FOUND", "操作记录不存在")
+        return item
 
     @app.get("/api/v1/contents")
     def list_contents(type: str = Query(default="", max_length=20)) -> dict[str, Any]:

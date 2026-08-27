@@ -1,10 +1,29 @@
+import { useEffect, useMemo, useState } from "react";
 import { PageHeader } from "../components/PageHeader";
 import { ErrorState, LoadingState } from "../components/States";
-import { useAppContext } from "../context/AppContext";
+import { apiGet, AppError } from "../lib/api";
+import type { PermissionMatrix } from "../types";
 
 export function PermissionPage() {
-  const { data, error, loading, reload } = useAppContext();
-  if (loading) return <LoadingState label="正在读取权限" />;
-  if (error || !data) return <ErrorState message={error ?? "权限数据为空"} onRetry={() => void reload()} />;
-  return <div className="page-stack"><PageHeader eyebrow="ACCESS CONTROL" title="用户与权限" description="本地演示版只有一个超级演示用户，不提供登录、角色切换或邀请码。" /><section className="permission-layout"><article className="panel user-profile"><div className="user-profile__avatar">超</div><div><span className="status-badge">本地演示用户</span><h2>{data.user.name}</h2><p>同时拥有四个角色，便于后续链路在本地连续演示；所有操作仍记录实际操作者。</p></div></article><article className="panel"><div className="panel__heading"><div><span className="eyebrow">ASSIGNED ROLES</span><h2>已分配角色</h2></div><span>{data.user.roles.length} 个</span></div><div className="role-grid">{data.user.roles.map((role, index) => <div key={role}><span>{String(index + 1).padStart(2, "0")}</span><strong>{role}</strong><small>已启用</small></div>)}</div></article><article className="panel"><div className="panel__heading"><div><span className="eyebrow">PERMISSION CODES</span><h2>有效权限码</h2></div><span>{data.user.permissions.length} 项</span></div><div className="permission-tags">{data.user.permissions.map((permission) => <code key={permission}>{permission}</code>)}</div></article></section></div>;
+  const [matrix, setMatrix] = useState<PermissionMatrix | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  async function load() {
+    setLoading(true); setError(null);
+    try { setMatrix(await apiGet<PermissionMatrix>("/permissions")); }
+    catch (reason) { setError(reason instanceof AppError ? reason.message : "权限矩阵加载失败"); }
+    finally { setLoading(false); }
+  }
+  useEffect(() => { void load(); }, []);
+  const descriptions = useMemo(() => new Map(matrix?.permissions.map((item) => [item.code, item.description]) ?? []), [matrix]);
+  if (loading) return <LoadingState label="正在读取权限矩阵" />;
+  if (error || !matrix) return <ErrorState message={error ?? "权限数据为空"} onRetry={() => void load()} />;
+
+  return <div className="page-stack permission-page">
+    <PageHeader eyebrow="ACCESS CONTROL" title="用户与权限" description="本地演示版以只读矩阵展示服务端权限契约；不提供登录、邀请码或角色修改。" actions={<span className="readonly-badge">只读演示模式</span>} />
+    <section className="permission-boundary"><strong>边界说明</strong><p>超级演示用户同时持有四个角色，便于本地连续演示。后端仍对每个操作校验权限码，只读访客的越权请求会被 403 拒绝并写入审计。正式多用户与邀请码不属于本地 MVP。</p></section>
+    <section><div className="section-heading"><div><span className="eyebrow">DEMO USERS</span><h2>演示用户</h2></div><p>{matrix.users.length} 个固定测试身份，不可在界面中增删。</p></div><div className="permission-user-grid">{matrix.users.map((user) => <article className="panel" key={user.id}><div className="permission-user-head"><span className="user-profile__avatar">{user.name.slice(0, 1)}</span><div><span className="status-badge">{user.id === matrix.currentUserId ? "当前用户" : "反向测试用户"}</span><h3>{user.name}</h3><code>{user.id}</code></div></div><div className="permission-user-facts"><span><strong>{user.roles.length}</strong>个角色</span><span><strong>{user.permissions.length}</strong>项有效权限</span></div><div className="permission-tags">{user.roles.map((role) => <code key={role}>{role}</code>)}{!user.roles.length && <small>未分配角色</small>}</div></article>)}</div></section>
+    <section className="panel"><div className="panel__heading"><div><span className="eyebrow">ROLE MATRIX</span><h2>角色与权限码矩阵</h2></div><span>{matrix.roles.length} 个角色 · {matrix.permissions.length} 个权限码</span></div><div className="role-matrix" role="table" aria-label="角色权限矩阵">{matrix.roles.map((role) => <div className="role-matrix__row" role="row" key={role.name}><div role="rowheader"><strong>{role.name}</strong><small>{role.permissions.length ? `${role.permissions.length} 项权限` : "无操作权限"}</small></div><div role="cell">{role.permissions.length ? role.permissions.map((code) => <span className="permission-code" key={code}><code>{code}</code><small>{descriptions.get(code)}</small></span>) : <span className="permission-empty">仅用于验证未认证/无权路径</span>}</div></div>)}</div></section>
+    <section className="panel permission-catalog"><div className="panel__heading"><div><span className="eyebrow">SERVER CONTRACT</span><h2>权限码说明</h2></div><span>服务端逐请求校验</span></div>{matrix.permissions.map((item) => <div key={item.code}><code>{item.code}</code><p>{item.description}</p></div>)}</section>
+  </div>;
 }
