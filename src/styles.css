@@ -420,6 +420,23 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .status-badge--pending { background: #fff5df; color: #8c631f; }
 .status-badge--in_progress { background: #eef0ff; color: #5549c7; }
 .status-badge--approved { background: #e8f8f3; color: #167e67; }
+.status-badge--possibly_outdated { background: #fff1d9; color: #a86113; }
+.status-badge--invalid { background: #fbe7e7; color: #a23c3c; }
+.status-badge--restore_pending { background: #e8effb; color: #315f9e; }
+.version-effective h2 { margin: 6px 0 8px; font-size: 15px; }
+.version-effective > p { margin-bottom: 14px; color: var(--muted); font-size: 10px; line-height: 1.65; }
+.version-diff-list { display: flex; flex-direction: column; }
+.version-diff-list > div { display: grid; grid-template-columns: 150px minmax(0,1fr); gap: 18px; padding: 13px 0; border-top: 1px solid var(--line); }
+.version-diff-list strong { font-size: 10px; }
+.version-diff-list p { display: grid; grid-template-columns: minmax(0,1fr) 24px minmax(0,1fr); gap: 10px; font-size: 10px; line-height: 1.6; }
+.version-diff-list del { color: #9d5555; text-decoration-color: #cf9999; }
+.version-diff-list ins { color: #167e67; text-decoration: none; font-weight: 700; }
+.version-diff-list p > span { color: var(--muted); text-align: center; }
+.version-history { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; }
+.version-history a { display: flex; flex-direction: column; gap: 5px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); }
+.version-history a:hover { border-color: #afa7ef; }
+.version-history strong { font-size: 14px; }
+.version-history span, .version-history small { color: var(--muted); font-size: 9px; }
 .status-badge--rejected { background: #fff0f0; color: #a94242; }
 .status-badge--cancelled { background: #f1f1f4; color: #6f7180; }
 
@@ -523,6 +540,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .review-workflow { align-items: flex-start; flex-direction: column; }
   .review-workflow__actions { justify-content: flex-start; }
   .review-filters, .review-task-grid, .asset-filters, .asset-grid { grid-template-columns: 1fr; }
+  .version-history { grid-template-columns: 1fr; }
+  .version-diff-list > div { grid-template-columns: 1fr; gap: 7px; }
   .review-records > div { grid-template-columns: 1fr 1fr; }
   .review-records p { grid-column: 1 / -1; }
 }

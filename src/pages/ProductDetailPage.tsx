@@ -28,19 +28,20 @@ export function ProductDetailPage() {
   const [uploading, setUploading] = useState<string | null>(null);
   const [manualId, setManualId] = useState<string | null>(null);
   const [manualText, setManualText] = useState("");
+  const [effectiveAt, setEffectiveAt] = useState("");
 
   async function load() {
     setLoading(true); setError(null);
     try {
       const result = await apiGet<ProductDetail>(`/products/${encodeURIComponent(id)}`);
-      setProduct(result); setDraft(cloneProduct(result)); setDirty(false);
+      setProduct(result); setDraft(cloneProduct(result)); setDirty(false); setEffectiveAt(result.effectiveAt?.slice(0, 16) ?? "");
     } catch (reason) {
       setError(reason instanceof AppError ? reason.message : "产品详情加载失败");
     } finally { setLoading(false); }
   }
 
   async function saveChanges(): Promise<ProductDetail | null> {
-    if (!draft || draft.status === "已确认") return product;
+    if (!draft || draft.status !== "草稿") return product;
     setSaving(true); setError(null); setNotice(null);
     try {
       const result = await apiJson<ProductDetail>(`/products/${encodeURIComponent(id)}`, "PATCH", {
@@ -114,7 +115,7 @@ export function ProductDetailPage() {
     if (dirty) current = await saveChanges();
     if (!current || !window.confirm("确认所有关键字段已经人工核对，并锁定当前产品版本吗？")) return;
     try {
-      const result = await apiJson<ProductDetail>(`/products/${id}/confirm`, "POST", { revision: current.revision });
+      const result = await apiJson<ProductDetail>(`/products/${id}/confirm`, "POST", { revision: current.revision, effectiveAt: current.previousVersionId ? effectiveAt || null : null });
       setProduct(result); setDraft(cloneProduct(result)); setNotice("产品已确认，当前版本进入只读状态");
     } catch (reason) {
       if (reason instanceof AppError && reason.code === "CONFIRMATION_INCOMPLETE") {
@@ -122,6 +123,16 @@ export function ProductDetailPage() {
         setError(`${reason.message}${missing?.length ? `：${missing.join("、")}` : ""}`);
       } else setError(reason instanceof AppError ? reason.message : "产品确认失败");
     }
+  }
+
+  async function createNewVersion() {
+    if (!product || !window.confirm(`基于 ${product.version} 创建新版本草稿吗？旧版本将保持有效，直到新版本确认。`)) return;
+    setSaving(true); setError(null); setNotice(null);
+    try {
+      const result = await apiJson<ProductDetail>(`/products/${id}/new-version`, "POST", { revision: product.revision });
+      navigate(`/products/${result.id}`);
+    } catch (reason) { setError(reason instanceof AppError ? reason.message : "新版本创建失败"); }
+    finally { setSaving(false); }
   }
 
   async function deleteDraft() {
@@ -141,7 +152,7 @@ export function ProductDetailPage() {
   if (error && !product) return <div className="page-stack"><Link className="back-link" to="/products">← 返回产品资料库</Link><ErrorState message={error} onRetry={() => void load()} /></div>;
   if (!product || !draft) return null;
 
-  const editable = product.status !== "已确认";
+  const editable = product.status === "草稿";
   const confirmedCount = draft.facts.filter((fact) => fact.confirmed && fact.value.trim()).length;
   const sourceDocuments = product.documents.filter((document) => !document.legacy);
 
@@ -151,7 +162,7 @@ export function ProductDetailPage() {
       <section className="product-hero product-hero--compact">
         <div className="product-monogram product-monogram--large">{product.name.slice(0, 2)}</div>
         <div className="product-hero__copy"><div><span className={editable ? "status-badge status-badge--draft" : "status-badge"}>{product.status}</span><span className="version-badge">{product.version} · 修订 {product.revision}</span></div><span className="eyebrow">{product.category || "类别待填写"} · {product.insurer || "保险公司待填写"}</span><h1>{product.name}</h1><p>{product.summary || "完善产品字段，上传源文件并确认关键事实。"}</p></div>
-        {editable && <div className="hero-actions"><button className="button button--light" type="button" disabled={!dirty || saving} onClick={() => void saveChanges()}>{saving ? "保存中…" : dirty ? "保存修改" : "已保存"}</button><button className="button button--ghost-light" type="button" onClick={() => void confirmProduct()}>确认产品</button></div>}
+        {editable ? <div className="hero-actions"><button className="button button--light" type="button" disabled={!dirty || saving} onClick={() => void saveChanges()}>{saving ? "保存中…" : dirty ? "保存修改" : "已保存"}</button><button className="button button--ghost-light" type="button" onClick={() => void confirmProduct()}>{product.previousVersionId ? `确认${product.version}` : "确认产品"}</button></div> : product.status === "已确认" && product.isCurrent !== false ? <div className="hero-actions"><button className="button button--light" type="button" disabled={saving} onClick={() => void createNewVersion()}>{saving ? "正在创建…" : "创建新版本"}</button></div> : null}
       </section>
       {(error || notice || uploading) && <div className={error ? "feedback-bar feedback-bar--error" : "feedback-bar"} role={error ? "alert" : "status"}><span>{error ?? notice ?? uploading}</span>{uploading && activeCancel.current && <button type="button" onClick={() => activeCancel.current?.()}>取消上传</button>}</div>}
 
@@ -171,10 +182,14 @@ export function ProductDetailPage() {
         </div>
         <aside className="detail-sidebar">
           <article className="panel upload-panel"><span className="eyebrow">SOURCE UPLOAD</span><h2>上传产品资料</h2><p>支持 PDF、DOCX、XLSX，单文件不超过 20 MB。扩展名、MIME 和真实文件结构会同时校验。</p><input ref={fileInput} className="visually-hidden" type="file" multiple accept=".pdf,.docx,.xlsx" onChange={(event) => void uploadFiles(event.target.files)} /><button className="button" type="button" disabled={Boolean(uploading)} onClick={() => fileInput.current?.click()}>选择文件</button></article>
+          {product.previousVersionId && <article className="panel version-effective"><span className="eyebrow">EFFECTIVE DATE</span><h2>新版本生效时间</h2><p>确认后，引用 {product.versions?.find((item) => item.id === product.previousVersionId)?.version ?? "旧版本"} 的批准素材会进入“可能过期”。</p><label className="field"><span>生效时间 *</span><input aria-label="新版本生效时间" type="datetime-local" value={effectiveAt} onChange={(event) => setEffectiveAt(event.target.value)} /></label></article>}
           <article className="notice-card"><strong>确认门禁</strong><p>需填写基本字段、逐项确认关键事实，并至少保留一份解析成功或人工粘贴的源资料。</p></article>
           <button className="danger-button" type="button" onClick={() => void deleteDraft()}>删除当前草稿</button>
         </aside>
       </section> : <section className="panel"><div className="panel__heading"><div><span className="eyebrow">CONFIRMED FACTS</span><h2>已确认关键事实</h2></div><span className="status-badge">只读版本</span></div><dl className="facts-grid">{product.facts.map((fact) => <div key={fact.label}><dt>{fact.label}</dt><dd>{fact.value}</dd><span aria-label="已确认">✓</span></div>)}</dl></section>}
+
+      {product.changes?.length ? <section className="panel"><div className="panel__heading"><div><span className="eyebrow">VERSION DIFFERENCE</span><h2>与上一版本的变化</h2></div><span className="status-badge status-badge--warning">{product.changes.length} 项变化</span></div><div className="version-diff-list">{product.changes.map((change) => <div key={change.field}><strong>{change.label}</strong><p><del>{change.before || "未填写"}</del><span>→</span><ins>{change.after || "未填写"}</ins></p></div>)}</div></section> : product.previousVersionId ? <section className="notice-card"><strong>尚未形成字段变化</strong><p>修改新版本基本字段或关键事实并保存后，这里会显示与上一版本的逐项差异。</p></section> : null}
+      {product.versions && product.versions.length > 1 && <section className="panel"><div className="panel__heading"><div><span className="eyebrow">VERSION HISTORY</span><h2>产品版本记录</h2></div><span className="readonly-badge">{product.versions.length} 个版本</span></div><div className="version-history">{product.versions.map((version) => <Link key={version.id} to={`/products/${version.id}`}><strong>{version.version}</strong><span>{version.status}{version.isCurrent ? " · 当前" : ""}</span><small>{version.effectiveAt ? `生效：${new Date(version.effectiveAt).toLocaleString("zh-CN")}` : "尚未生效"}</small></Link>)}</div></section>}
 
       <section className="panel"><div className="panel__heading"><div><span className="eyebrow">SOURCE DOCUMENTS</span><h2>上传与解析状态</h2></div><span className="readonly-badge">{sourceDocuments.length} 份用户资料</span></div>
         {sourceDocuments.length === 0 ? <div className="compact-empty"><strong>尚未上传源资料</strong><p>选择 PDF、DOCX 或 XLSX 后，文件会先安全入库再解析。</p></div> : <div className="document-list document-list--managed">{sourceDocuments.map((document) => <div key={document.id ?? document.name}>

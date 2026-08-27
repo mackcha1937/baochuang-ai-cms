@@ -47,7 +47,9 @@ export function ContentStudioPage({ type }: { type: ContentType }) {
         apiGet<{ items: ProductSummary[] }>("/products"),
         apiGet<{ items: ContentItem[] }>(`/contents?type=${type}`),
       ]);
-      setProducts(productResult.items.filter((product) => product.status === "已确认"));
+      const confirmedProducts = productResult.items.filter((product) => product.status === "已确认" && product.isCurrent !== false);
+      setProducts(confirmedProducts);
+      setProductId((current) => confirmedProducts.some((product) => product.id === current) ? current : confirmedProducts[0]?.id ?? "");
       setItems(contentResult.items);
     } catch (reason) { setError(reason instanceof AppError ? reason.message : "创作项目加载失败"); }
     finally { setLoading(false); }

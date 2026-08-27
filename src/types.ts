@@ -44,6 +44,7 @@ export interface BootstrapData {
     qwen: "configured" | "not_configured";
   };
   recentAudit: AuditItem[];
+  featuredProduct?: ProductSummary | null;
 }
 
 export interface ProductSummary {
@@ -55,6 +56,10 @@ export interface ProductSummary {
   status: string;
   sourceType: string;
   updatedAt: string;
+  rootProductId?: string;
+  previousVersionId?: string | null;
+  isCurrent?: boolean;
+  effectiveAt?: string | null;
 }
 
 export interface ProductDetail extends ProductSummary {
@@ -66,6 +71,25 @@ export interface ProductDetail extends ProductSummary {
   ownerId: string;
   createdAt: string;
   confirmedAt: string | null;
+  rootProductId?: string;
+  previousVersionId?: string | null;
+  isCurrent?: boolean;
+  effectiveAt?: string | null;
+  versions?: ProductVersionSummary[];
+  changes?: ProductChange[];
+}
+
+export interface ProductVersionSummary extends ProductSummary {
+  isCurrent: boolean;
+  effectiveAt: string | null;
+  confirmedAt: string | null;
+}
+
+export interface ProductChange {
+  field: string;
+  label: string;
+  before: string;
+  after: string;
 }
 
 export interface ProductFact {
@@ -191,7 +215,7 @@ export interface AssetSummary {
   type: ContentType;
   channel: "wechat" | "xiaohongshu" | null;
   title: string;
-  status: "approved";
+  status: "approved" | "possibly_outdated" | "invalid" | "restore_pending";
   createdAt: string;
   updatedAt: string;
 }

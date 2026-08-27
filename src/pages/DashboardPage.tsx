@@ -19,6 +19,7 @@ export function DashboardPage() {
     ["批准素材", data.stats.approvedAssets, "份可用内容"],
     ["可能过期", data.stats.possiblyOutdated, "项需判断影响"],
   ];
+  const featured = data.featuredProduct;
 
   return (
     <div className="page-stack dashboard-page">
@@ -29,7 +30,7 @@ export function DashboardPage() {
           <h1>让一份保险资料，生长出<br /><em>更可信的内容。</em></h1>
           <p>{data.brand.slogan}。先把事实和流程搭稳，再进入每一次创作。</p>
           <div className="hero-panel__actions">
-            <Link className="button button--light" to="/products/darwin-12">查看达尔文12号</Link>
+            <Link className="button button--light" to={featured ? `/products/${featured.id}` : "/products"}>查看当前产品</Link>
             <Link className="button button--ghost-light" to="/products">进入产品资料库</Link>
           </div>
         </div>
@@ -66,9 +67,9 @@ export function DashboardPage() {
       <section className="dashboard-columns">
         <article className="panel">
           <div className="panel__heading"><div><span className="eyebrow">DATA SOURCE</span><h2>当前产品资料</h2></div><Link to="/products">查看全部</Link></div>
-          <Link className="featured-product" to="/products/darwin-12">
+          <Link className="featured-product" to={featured ? `/products/${featured.id}` : "/products"}>
             <div className="featured-product__symbol">D12</div>
-            <div><span className="status-badge">已确认 · V1</span><strong>复星联合达尔文12号重大疾病保险（互联网）</strong><p>7 项关键事实已确认，可作为后续创作的数据来源。</p></div>
+            <div><span className="status-badge">{featured ? `已确认 · ${featured.version}` : "暂无当前版本"}</span><strong>{featured?.name ?? "进入产品资料库"}</strong><p>{featured ? "当前产品版本可作为后续创作的数据来源。" : "确认产品后即可用于内容创作。"}</p></div>
             <span aria-hidden="true">→</span>
           </Link>
         </article>

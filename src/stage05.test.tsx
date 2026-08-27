@@ -96,7 +96,7 @@ describe("Stage 05 training player", () => {
     await openCourse();
 
     fireEvent.click(screen.getByRole("button", { name: "提交答案" }));
-    expect(screen.getByRole("alert")).toHaveTextContent("请完成全部 3 道题");
+    expect(await screen.findByRole("alert")).toHaveTextContent("请完成全部 3 道题");
     for (const [index, question] of script.questions.entries()) {
       const group = screen.getByRole("group", { name: `${index + 1}. ${question.question}` });
       fireEvent.click(within(group).getByLabelText("选项甲"));

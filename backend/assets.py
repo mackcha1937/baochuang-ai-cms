@@ -52,23 +52,31 @@ class AssetRepository:
         result.update({"snapshot": json.loads(row["snapshot_json"]), "submittedBy": row["created_by"], "submittedAt": row["submitted_at"]})
         return result
 
-    def duplicate(self, actor_id: str, asset_id: str) -> str:
+    def duplicate(
+        self,
+        actor_id: str,
+        asset_id: str,
+        *,
+        product_id_override: Optional[str] = None,
+        allowed_statuses: tuple[str, ...] = ("approved",),
+        audit_action: str = "asset.duplicate",
+    ) -> str:
         timestamp, content_id = now_iso(), uuid4().hex
         with self.database.connect() as connection:
             row = connection.execute(
                 """SELECT asset.*, version.snapshot_json FROM assets asset
                    JOIN content_versions version ON version.id = asset.content_version_id
-                   WHERE asset.id = ? AND asset.status = 'approved'""",
+                   WHERE asset.id = ?""",
                 (asset_id,),
             ).fetchone()
-            if row is None:
+            if row is None or row["status"] not in allowed_statuses:
                 raise ValueError("missing")
             snapshot = json.loads(row["snapshot_json"])
             content = snapshot.get("content") if isinstance(snapshot.get("content"), dict) else {}
             title = f"{str(content.get('title') or row['title'])}（副本）"[:150]
             settings = content.get("settings") if isinstance(content.get("settings"), dict) else {}
             manual_source = str(content.get("manualSource") or "")[:100_000]
-            product_id = content.get("productId")
+            product_id = product_id_override or content.get("productId")
             if product_id and connection.execute("SELECT 1 FROM products WHERE id = ? AND status = '已确认'", (product_id,)).fetchone() is None:
                 product_id = None
             payload: dict[str, Any] = {}
@@ -97,8 +105,58 @@ class AssetRepository:
                 elif row["type"] == "training":
                     payload["scriptStatus"] = "draft"
                 connection.execute("UPDATE content_items SET payload_json = ? WHERE id = ?", (json.dumps(payload, ensure_ascii=False), content_id))
-            Database._audit(connection, actor_id, "asset.duplicate", "asset", asset_id, f"复制批准素材为新草稿 {content_id}")
+            Database._audit(connection, actor_id, audit_action, "asset", asset_id, f"复制素材为新草稿 {content_id}" + (f"，关联产品 {product_id}" if product_id else ""))
         return content_id
+
+    def revise_for_current_product(self, actor_id: str, asset_id: str) -> str:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """SELECT asset.status, item.product_id, product.root_product_id
+                   FROM assets asset JOIN content_items item ON item.id = asset.content_id
+                   LEFT JOIN products product ON product.id = item.product_id
+                   WHERE asset.id = ?""",
+                (asset_id,),
+            ).fetchone()
+            if row is None or row["status"] != "possibly_outdated" or not row["root_product_id"]:
+                raise ValueError("missing")
+            replacement = connection.execute(
+                """SELECT id FROM products WHERE root_product_id = ? AND status = '已确认'
+                   AND is_current = 1 AND id != ? ORDER BY confirmed_at DESC LIMIT 1""",
+                (row["root_product_id"], row["product_id"]),
+            ).fetchone()
+        if replacement is None:
+            raise ValueError("replacement_missing")
+        return self.duplicate(
+            actor_id,
+            asset_id,
+            product_id_override=replacement["id"],
+            allowed_statuses=("possibly_outdated",),
+            audit_action="asset.revise",
+        )
+
+    def transition(self, actor_id: str, asset_id: str, action: str, reason: str) -> dict[str, Any]:
+        transitions = {
+            "keep-valid": ({"possibly_outdated", "restore_pending"}, "approved", "asset.keep_valid"),
+            "invalidate": ({"approved", "possibly_outdated"}, "invalid", "asset.invalidate"),
+            "restore": ({"invalid"}, "restore_pending", "asset.restore"),
+        }
+        if action not in transitions:
+            raise ValueError("action")
+        if not reason.strip():
+            raise ValueError("reason_required")
+        allowed, target, audit_action = transitions[action]
+        timestamp = now_iso()
+        with self.database.connect() as connection:
+            row = connection.execute("SELECT status FROM assets WHERE id = ?", (asset_id,)).fetchone()
+            if row is None:
+                raise ValueError("missing")
+            if row["status"] not in allowed:
+                raise ValueError("state")
+            connection.execute("UPDATE assets SET status = ?, updated_at = ? WHERE id = ?", (target, timestamp, asset_id))
+            Database._audit(connection, actor_id, audit_action, "asset", asset_id, reason.strip())
+        result = self.get_asset(asset_id)
+        assert result is not None
+        return result
 
     def download(self, actor_id: str, asset_id: str) -> tuple[bytes, str, str]:
         asset = self.get_asset(asset_id)

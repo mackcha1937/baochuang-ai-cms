@@ -160,7 +160,7 @@ def test_asset_negative_permissions_validation_safe_filename_missing_file_and_au
             assert response.status_code == 403
 
         assert client.get("/api/v1/assets?type=video").json()["error"]["code"] == "ASSET_TYPE_INVALID"
-        assert client.get("/api/v1/assets?status=invalid").json()["error"]["code"] == "ASSET_STATUS_INVALID"
+        assert client.get("/api/v1/assets?status=archived").json()["error"]["code"] == "ASSET_STATUS_INVALID"
         assert client.get("/api/v1/assets?channel=email").json()["error"]["code"] == "ASSET_CHANNEL_INVALID"
         assert client.get("/api/v1/assets/not-found").status_code == 404
         assert client.get("/api/v1/assets/not-found/download").status_code == 404

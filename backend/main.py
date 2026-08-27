@@ -6,6 +6,7 @@ import re
 import unicodedata
 import zipfile
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Optional, Union
 from urllib.parse import quote
@@ -60,6 +61,33 @@ class ProductUpdate(BaseModel):
 
 class RevisionRequest(BaseModel):
     revision: int = Field(ge=1)
+
+
+class ProductConfirmRequest(RevisionRequest):
+    effectiveAt: Optional[str] = Field(default=None, max_length=40)
+
+    @field_validator("effectiveAt")
+    @classmethod
+    def valid_effective_at(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not value.strip():
+            return None
+        cleaned = value.strip()
+        try:
+            datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("生效时间格式无效") from exc
+        return cleaned
+
+
+class AssetReasonRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("reason")
+    @classmethod
+    def clean_reason(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("必须填写处置原因")
+        return value.strip()
 
 
 class ManualTextRequest(BaseModel):
@@ -267,7 +295,7 @@ def create_app(
         product = database.get_product(product_id)
         if product is None:
             raise ApiError(404, "PRODUCT_NOT_FOUND", "产品不存在或已被移除")
-        if product["status"] == "已确认":
+        if product["status"] != "草稿":
             raise ApiError(409, "PRODUCT_CONFIRMED", "已确认产品不可直接覆盖，请创建新版本")
         return product
 
@@ -277,7 +305,9 @@ def create_app(
 
     @app.get("/api/v1/bootstrap")
     def bootstrap() -> dict[str, Any]:
-        return {"brand": database.get_brand(), "user": database.get_demo_user(), "stats": database.get_stats(), "serviceStatus": {"api": "ready", "deepseek": "configured" if os.getenv("DEEPSEEK_API_KEY", "").strip() else "not_configured", "qwen": "configured" if os.getenv("DASHSCOPE_API_KEY", "").strip() else "not_configured"}, "recentAudit": database.get_recent_audit(5)}
+        products = database.list_products()
+        featured = next((item for item in products if item["status"] == "已确认" and item["isCurrent"]), None)
+        return {"brand": database.get_brand(), "user": database.get_demo_user(), "stats": database.get_stats(), "serviceStatus": {"api": "ready", "deepseek": "configured" if os.getenv("DEEPSEEK_API_KEY", "").strip() else "not_configured", "qwen": "configured" if os.getenv("DASHSCOPE_API_KEY", "").strip() else "not_configured"}, "recentAudit": database.get_recent_audit(5), "featuredProduct": featured}
 
     @app.get("/api/v1/products")
     def products(q: str = Query(default="", max_length=100)) -> dict[str, Any]:
@@ -312,8 +342,8 @@ def create_app(
         return product
 
     @app.post("/api/v1/products/{product_id}/confirm")
-    def confirm_product(product_id: str, payload: RevisionRequest, user: dict[str, Any] = Depends(require("product.confirm"))) -> dict[str, Any]:
-        result, missing = database.confirm_product(user["id"], product_id, payload.revision)
+    def confirm_product(product_id: str, payload: ProductConfirmRequest, user: dict[str, Any] = Depends(require("product.confirm"))) -> dict[str, Any]:
+        result, missing = database.confirm_product(user["id"], product_id, payload.revision, payload.effectiveAt)
         if result == "missing": raise ApiError(404, "PRODUCT_NOT_FOUND", "产品不存在或已被移除")
         if result == "conflict": raise ApiError(409, "REVISION_CONFLICT", "产品已更新，请刷新后重新确认")
         if result == "confirmed": raise ApiError(409, "PRODUCT_CONFIRMED", "产品已经确认")
@@ -321,6 +351,18 @@ def create_app(
         product = database.get_product(product_id)
         assert product is not None
         return product
+
+    @app.post("/api/v1/products/{product_id}/new-version", status_code=201)
+    def create_product_version(product_id: str, payload: RevisionRequest, user: dict[str, Any] = Depends(require("product.update"))) -> JSONResponse:
+        result, product = database.create_product_version(user["id"], product_id, payload.revision)
+        if result == "missing":
+            raise ApiError(404, "PRODUCT_NOT_FOUND", "产品不存在或已被移除")
+        if result == "state":
+            raise ApiError(409, "PRODUCT_VERSION_STATE_INVALID", "只能从当前已确认产品创建新版本")
+        if result == "conflict":
+            raise ApiError(409, "REVISION_CONFLICT", "产品已更新，请刷新后重试")
+        assert product is not None
+        return JSONResponse(status_code=200 if result == "existing" else 201, content=product)
 
     @app.delete("/api/v1/products/{product_id}", status_code=204, response_class=Response)
     def delete_product(product_id: str, user: dict[str, Any] = Depends(require("product.update"))) -> Response:
@@ -822,7 +864,7 @@ def create_app(
     ) -> dict[str, Any]:
         if type and type not in {"image", "article", "training"}:
             raise ApiError(422, "ASSET_TYPE_INVALID", "素材类型无效")
-        if status and status not in {"approved"}:
+        if status and status not in {"approved", "possibly_outdated", "invalid", "restore_pending"}:
             raise ApiError(422, "ASSET_STATUS_INVALID", "素材状态无效")
         if channel and channel not in {"wechat", "xiaohongshu"}:
             raise ApiError(422, "ASSET_CHANNEL_INVALID", "素材渠道无效")
@@ -845,6 +887,38 @@ def create_app(
         item = content_repository.get_item(content_id)
         assert item is not None
         return item
+
+    @app.post("/api/v1/assets/{asset_id}/revise", status_code=201)
+    def revise_asset(asset_id: str, user: dict[str, Any] = Depends(require("asset.duplicate"))) -> dict[str, Any]:
+        try:
+            content_id = asset_repository.revise_for_current_product(user["id"], asset_id)
+        except ValueError as exc:
+            if str(exc) == "replacement_missing":
+                raise ApiError(409, "PRODUCT_REPLACEMENT_MISSING", "当前产品新版本不存在，无法创建修改草稿") from exc
+            raise ApiError(409, "ASSET_STATUS_INVALID", "仅可能过期素材可以关联新产品版本修改") from exc
+        item = content_repository.get_item(content_id)
+        assert item is not None
+        return item
+
+    def transition_asset(asset_id: str, action: str, payload: AssetReasonRequest, user: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return asset_repository.transition(user["id"], asset_id, action, payload.reason)
+        except ValueError as exc:
+            if str(exc) == "missing":
+                raise ApiError(404, "ASSET_NOT_FOUND", "素材不存在") from exc
+            raise ApiError(409, "ASSET_STATE_CONFLICT", "素材当前状态不能执行该处置") from exc
+
+    @app.post("/api/v1/assets/{asset_id}/keep-valid")
+    def keep_asset_valid(asset_id: str, payload: AssetReasonRequest, user: dict[str, Any] = Depends(require("asset.invalidate"))) -> dict[str, Any]:
+        return transition_asset(asset_id, "keep-valid", payload, user)
+
+    @app.post("/api/v1/assets/{asset_id}/invalidate")
+    def invalidate_asset(asset_id: str, payload: AssetReasonRequest, user: dict[str, Any] = Depends(require("asset.invalidate"))) -> dict[str, Any]:
+        return transition_asset(asset_id, "invalidate", payload, user)
+
+    @app.post("/api/v1/assets/{asset_id}/restore")
+    def restore_asset(asset_id: str, payload: AssetReasonRequest, user: dict[str, Any] = Depends(require("asset.invalidate"))) -> dict[str, Any]:
+        return transition_asset(asset_id, "restore", payload, user)
 
     @app.get("/api/v1/assets/{asset_id}/download", response_model=None)
     def download_asset(asset_id: str, user: dict[str, Any] = Depends(require("asset.download"))) -> Response:
