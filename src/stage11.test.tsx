@@ -72,7 +72,7 @@ describe("Stage 11 Markdown content and presenter", () => {
   it("uses the generated yellow 3D presenter in the training player", async () => {
     const item: ContentItem = {
       id: "training-avatar", type: "training", title: "数字人课程", productId: "darwin-12", status: "draft", revision: 5, manualSource: "", settings: {}, branches: [], jobs: [], reviews: [], createdAt: "2026-08-28", updatedAt: "2026-08-28",
-      payload: { outlineStatus: "confirmed", scriptStatus: "confirmed", script: { chapters: [{ title: "第一章", narration: "欢迎学习本章。", knowledgeCard: "依据已确认资料。" }], questions: [0, 1, 2].map((index) => ({ question: `问题${index}`, options: ["正确", "错误"], answer: "正确", explanation: "依据资料" })) } },
+      payload: { outlineStatus: "confirmed", outline: { title: "数字人课程框架", chapters: [{ title: "第一章", objective: "掌握保障重点。" }] }, scriptStatus: "confirmed", script: { chapters: [{ title: "第一章", narration: "欢迎学习本章。", knowledgeCard: "依据已确认资料。" }], questions: [0, 1, 2].map((index) => ({ question: `问题${index}`, options: ["正确", "错误"], answer: "正确", explanation: "依据资料" })) } },
       trainingSession: { chapterIndex: 0, sentenceIndex: 0, playbackRate: 1, mode: "silent", answers: {}, lastScore: null, results: [], attempt: 0, status: "ready", updatedAt: "2026-08-28" },
     };
     vi.stubGlobal("fetch", mockStudio("training", item));
@@ -81,5 +81,13 @@ describe("Stage 11 Markdown content and presenter", () => {
     const presenter = await screen.findByLabelText("黄色三维吉祥物数字讲师待机");
     expect(presenter.querySelector("img")).toHaveAttribute("src", "/training-presenter-v2.png");
     expect(screen.queryByLabelText(/二维动画讲师/)).not.toBeInTheDocument();
+    const outlineEditor = screen.getByLabelText("training_outline 人工内容") as HTMLTextAreaElement;
+    const scriptEditor = screen.getByLabelText("training_script 人工内容") as HTMLTextAreaElement;
+    expect(outlineEditor.value).toContain("# 数字人课程框架");
+    expect(outlineEditor.value).toContain("### 学习目标");
+    expect(scriptEditor.value).toContain("# 培训讲稿");
+    expect(scriptEditor.value).toContain("## 课程测试");
+    expect(scriptEditor.value).not.toContain('"chapters"');
+    expect(screen.getAllByText("人工填写 / 编辑 Markdown")).toHaveLength(2);
   });
 });

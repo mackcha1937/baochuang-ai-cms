@@ -242,19 +242,19 @@ def test_deepseek_markdown_retry_and_request_security(monkeypatch) -> None:
     assert "secret-not-for-storage" not in str(calls[0]["json"])
 
 
-def test_deepseek_training_output_remains_json(monkeypatch) -> None:
+def test_deepseek_training_output_uses_markdown(monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
 
     def fake_post(url: str, **kwargs: Any) -> StubResponse:
         calls.append({"url": url, **kwargs})
-        return StubResponse(200, deepseek_payload(__import__("json").dumps(OUTPUTS["training_outline"], ensure_ascii=False)))
+        return StubResponse(200, deepseek_payload(render_markdown_output("training_outline", OUTPUTS["training_outline"])))
 
     monkeypatch.setattr("backend.ai_content.httpx.post", fake_post)
     provider = DeepSeekProvider(api_key="training-key-not-for-storage", model="deepseek-v4-flash", endpoint="https://api.deepseek.com/chat/completions")
     result = provider.generate("training_outline", {"manualSource": "培训素材"})
     assert result == OUTPUTS["training_outline"]
-    assert calls[0]["json"]["response_format"] == {"type": "json_object"}
-    assert "只返回一个 JSON 对象" in calls[0]["json"]["messages"][0]["content"]
+    assert "response_format" not in calls[0]["json"]
+    assert "只返回 Markdown" in calls[0]["json"]["messages"][0]["content"]
 
 
 @pytest.mark.parametrize(

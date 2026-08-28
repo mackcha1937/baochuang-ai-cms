@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { PageHeader } from "../components/PageHeader";
 import { EmptyState, ErrorState, LoadingState } from "../components/States";
 import { apiGet, apiJson, apiRequest, AppError, uploadVisualFile } from "../lib/api";
-import { isMarkdownTask, markdownTemplates, renderContentMarkdown } from "../lib/contentMarkdown";
+import { markdownTemplates, renderContentMarkdown } from "../lib/contentMarkdown";
 import type { ContentBranch, ContentItem, ContentReviewSummary, ContentReviewStatus, ContentType, GenerationJob, ProductSummary, ReviewTask, TrainingSession, VisualDraft, VisualLayout } from "../types";
 
 const labels = {
@@ -18,11 +18,6 @@ const VISUAL_POLL_TIMEOUT_MS = 210_000;
 
 function delay(milliseconds: number) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
-}
-
-function pretty(value: unknown) {
-  if (!value || typeof value !== "object") return "";
-  return JSON.stringify(value, null, 2);
 }
 
 export function ContentStudioPage({ type }: { type: ContentType }) {
@@ -363,8 +358,8 @@ function TrainingStudio({ item, busy, editLocked, onRun, onConfirm, onSaveManual
     && Array.isArray(script?.questions) && script.questions.length === 3
     && script.questions.every((question: any) => question && typeof question.question === "string" && Array.isArray(question.options) && question.options.length >= 2 && question.options.every((option: unknown) => typeof option === "string") && typeof question.answer === "string" && typeof question.explanation === "string");
   return <div className="training-nodes">
-    <section className="panel studio-node"><div className="panel__heading"><h2>01 课程框架</h2><span className="status-badge">{item.payload.outlineStatus ?? "empty"}</span></div>{outline ? <pre className="structured-output">{pretty(outline)}</pre> : <p className="studio-hint">按培训对象、目的和 3 分钟时长生成章节。</p>}<ManualJsonEditor task="training_outline" value={outline} disabled={busy || editLocked || item.payload.outlineStatus === "confirmed"} onSave={(output) => onSaveManual("training_outline", output)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || editLocked || item.payload.outlineStatus === "confirmed"} onClick={() => void onRun("training_outline")}>生成课程框架</button>{outline && item.payload.outlineStatus !== "confirmed" && <button className="button" type="button" disabled={busy || editLocked} onClick={() => void onConfirm("outline")}>确认框架</button>}</div></section>
-    <section className="panel studio-node"><div className="panel__heading"><h2>02 培训讲稿</h2><span className="status-badge">{scriptStatus}</span></div>{script ? <pre className="structured-output">{pretty(script)}</pre> : <p className="studio-hint">确认框架后生成逐章讲稿、知识卡和 3 道测试题。</p>}<ManualJsonEditor task="training_script" value={script} disabled={busy || editLocked || item.payload.outlineStatus !== "confirmed" || item.payload.scriptStatus === "confirmed"} onSave={(output) => onSaveManual("training_script", output)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || editLocked || item.payload.outlineStatus !== "confirmed" || item.payload.scriptStatus === "confirmed"} onClick={() => void onRun("training_script")}>生成培训讲稿</button>{script && item.payload.scriptStatus !== "confirmed" && <button className="button" type="button" disabled={busy || editLocked} onClick={() => void onConfirm("script")}>确认讲稿</button>}{item.payload.scriptStatus === "confirmed" && <button className="button button--secondary" type="button" disabled={busy || editLocked} onClick={() => void onUnlockScript()}>解锁修改讲稿</button>}</div></section>
+    <section className="panel studio-node"><div className="panel__heading"><h2>01 课程框架</h2><span className="status-badge">{item.payload.outlineStatus ?? "empty"}</span></div>{outline ? <pre className="structured-output structured-output--markdown">{renderContentMarkdown("training_outline", outline)}</pre> : <p className="studio-hint">按培训对象、目的和时长生成 Markdown 章节与学习目标。</p>}<ManualContentEditor task="training_outline" value={outline} disabled={busy || editLocked || item.payload.outlineStatus === "confirmed"} onSave={(output) => onSaveManual("training_outline", output)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || editLocked || item.payload.outlineStatus === "confirmed"} onClick={() => void onRun("training_outline")}>生成 Markdown 课程框架</button>{outline && item.payload.outlineStatus !== "confirmed" && <button className="button" type="button" disabled={busy || editLocked} onClick={() => void onConfirm("outline")}>确认框架</button>}</div></section>
+    <section className="panel studio-node"><div className="panel__heading"><h2>02 培训讲稿</h2><span className="status-badge">{scriptStatus}</span></div>{script ? <pre className="structured-output structured-output--markdown">{renderContentMarkdown("training_script", script)}</pre> : <p className="studio-hint">确认框架后生成 Markdown 逐章讲稿、知识卡和 3 道测试题。</p>}<ManualContentEditor task="training_script" value={script} disabled={busy || editLocked || item.payload.outlineStatus !== "confirmed" || item.payload.scriptStatus === "confirmed"} onSave={(output) => onSaveManual("training_script", output)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || editLocked || item.payload.outlineStatus !== "confirmed" || item.payload.scriptStatus === "confirmed"} onClick={() => void onRun("training_script")}>生成 Markdown 培训讲稿</button>{script && item.payload.scriptStatus !== "confirmed" && <button className="button" type="button" disabled={busy || editLocked} onClick={() => void onConfirm("script")}>确认讲稿</button>}{item.payload.scriptStatus === "confirmed" && <button className="button button--secondary" type="button" disabled={busy || editLocked} onClick={() => void onUnlockScript()}>解锁修改讲稿</button>}</div></section>
     {script && item.payload.scriptStatus === "confirmed" && playerReady ? <TrainingPlayer item={item} busy={busy} onSaveSession={onSaveSession} onSubmitQuiz={onSubmitQuiz} onResetQuiz={onResetQuiz} /> : <section className="panel training-locked"><span className="eyebrow">PLAYER LOCKED</span><h2>03 互动培训播放器</h2><p>{item.payload.scriptStatus === "confirmed" && !playerReady ? "讲稿章节或 3 道测试题结构不完整，请解锁讲稿修复后重新确认。" : "人工确认讲稿后才开放语音、字幕、章节进度和测试，避免播放未核对内容。"}</p></section>}
     {item.trainingSession?.status === "stale" && <div className="visual-warning" role="status">讲稿已解锁，旧播放进度和答题结果仅作历史保留；重新确认讲稿后会建立新的播放会话。</div>}
   </div>;
@@ -544,14 +539,8 @@ function JobPanel({ item, jobs, busy, onRetry, onCancel }: { item: ContentItem; 
   return <section className="panel"><div className="panel__heading"><div><span className="eyebrow">GENERATION JOBS</span><h2>生成任务记录</h2></div></div>{jobs.length === 0 ? <p className="studio-hint">尚未创建任务。</p> : <div className="job-list">{jobs.map((job) => { const branchReviewLocked = item.type === "article" && job.branchId ? (item.branches.find((branch) => branch.id === job.branchId)?.reviewStatus ?? "draft") !== "draft" : false; const locked = isJobLocked(item, job) || branchReviewLocked || (item.type !== "article" && item.status !== "draft"); return <div key={job.id}><span className={`status-badge status-badge--${job.status}`}>{job.status}</span><strong>{job.taskType}</strong><small>attempt {job.attempt} · {job.provider}{job.model ? ` / ${job.model}` : ""}</small>{job.error && <p>{job.error}</p>}{locked && ["failed", "cancelled"].includes(job.status) && <small>{branchReviewLocked ? "该渠道已提交审核，历史任务已归档" : "节点已确认，历史任务已归档"}</small>}{!locked && ["failed", "cancelled"].includes(job.status) && <button type="button" disabled={busy} onClick={() => void onRetry(job)}>重试</button>}{["queued", "running"].includes(job.status) && <button type="button" disabled={busy || locked} onClick={() => void onCancel(job)}>取消</button>}</div>; })}</div>}</section>;
 }
 
-const manualTemplates: Record<string, Record<string, unknown>> = {
-  training_outline: { title: "", chapters: [] },
-  training_script: { chapters: [], questions: [{}, {}, {}] },
-};
-
 function ManualContentEditor({ task, value, disabled, onSave }: { task: string; value: Record<string, any> | undefined; disabled: boolean; onSave: (content: string | Record<string, unknown>) => Promise<void> }) {
-  if (isMarkdownTask(task)) return <ManualMarkdownEditor task={task} value={value} disabled={disabled} onSave={onSave} />;
-  return <ManualJsonEditor task={task} value={value} disabled={disabled} onSave={onSave} />;
+  return <ManualMarkdownEditor task={task} value={value} disabled={disabled} onSave={onSave} />;
 }
 
 function ManualMarkdownEditor({ task, value, disabled, onSave }: { task: string; value: Record<string, any> | undefined; disabled: boolean; onSave: (content: string | Record<string, unknown>) => Promise<void> }) {
@@ -568,14 +557,4 @@ function ManualMarkdownEditor({ task, value, disabled, onSave }: { task: string;
     setLocalError(null); void onSave(text.trim());
   }
   return <details className="manual-json manual-markdown"><summary>人工填写 / 编辑 Markdown</summary><p>使用标题、列表和自然段即可，不需要填写 JSON。</p><textarea aria-label={`${task} 人工内容`} rows={12} value={text} disabled={disabled} spellCheck={false} onChange={(event) => setText(event.target.value)} /><div>{localError && <span role="alert">{localError}</span>}<button className="button button--secondary" type="button" disabled={disabled} onClick={save}>保存 Markdown</button></div></details>;
-}
-
-function ManualJsonEditor({ task, value, disabled, onSave }: { task: string; value: Record<string, unknown> | undefined; disabled: boolean; onSave: (output: Record<string, unknown>) => Promise<void> }) {
-  const [text, setText] = useState(pretty(value && Object.keys(value).length ? value : manualTemplates[task]));
-  const [localError, setLocalError] = useState<string | null>(null);
-  useEffect(() => {
-    setText(pretty(value && Object.keys(value).length ? value : manualTemplates[task]));
-    setLocalError(null);
-  }, [task, value]);
-  return <details className="manual-json"><summary>人工填写 / 编辑结构化内容</summary><textarea aria-label={`${task} 人工内容`} rows={8} value={text} disabled={disabled} onChange={(event) => setText(event.target.value)} /><div>{localError && <span role="alert">{localError}</span>}<button className="button button--secondary" type="button" disabled={disabled} onClick={() => { try { const output = JSON.parse(text) as Record<string, unknown>; setLocalError(null); void onSave(output); } catch { setLocalError("JSON 格式无效，请检查括号和引号"); } }}>保存人工内容</button></div></details>;
 }

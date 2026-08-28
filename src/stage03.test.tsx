@@ -117,7 +117,7 @@ describe("Stage 03 AI content studio", () => {
     fireEvent.click(await screen.findByRole("button", { name: /顺序门禁课程/ }));
     expect(await screen.findByLabelText("training_outline 人工内容")).toBeEnabled();
     expect(screen.getByLabelText("training_script 人工内容")).toBeDisabled();
-    expect(screen.getByRole("button", { name: "生成培训讲稿" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "生成 Markdown 培训讲稿" })).toBeDisabled();
   });
 
   it("archives retries and locks editors after training nodes are confirmed", async () => {
