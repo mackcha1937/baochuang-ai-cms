@@ -23,6 +23,7 @@ from backend.assets import AssetRepository
 from backend.database import Database
 from backend.document_parser import EmptyDocumentError, parse_document
 from backend.image_generation import ImageProvider, QwenImageProvider, validate_raster
+from backend.markdown_content import MARKDOWN_TASKS, parse_markdown_output
 from backend.review import REVIEW_STAGES, ReviewRepository
 from backend.seed import PERMISSION_DESCRIPTIONS, ROLE_PERMISSIONS
 
@@ -150,7 +151,13 @@ class ManualOutputRequest(BaseModel):
     taskType: str
     branchId: Optional[str] = None
     revision: int = Field(ge=1)
-    output: dict[str, Any]
+    output: Optional[dict[str, Any]] = None
+    markdown: Optional[str] = Field(default=None, max_length=100_000)
+
+    @field_validator("markdown")
+    @classmethod
+    def clean_markdown(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip() if value is not None else None
 
 
 class VisualLayoutRequest(BaseModel):
@@ -874,8 +881,19 @@ def create_app(
     def save_manual_output(content_id: str, payload: ManualOutputRequest, user: dict[str, Any] = Depends(require("content.edit"))) -> dict[str, Any]:
         if payload.taskType not in {"image_copy", "article_outline", "article_generate", "training_outline", "training_script"}:
             raise ApiError(422, "AI_TASK_UNSUPPORTED", "不支持的内容节点")
+        if payload.markdown is not None:
+            if payload.taskType not in MARKDOWN_TASKS:
+                raise ApiError(422, "MARKDOWN_TASK_UNSUPPORTED", "该内容节点不使用 Markdown")
+            try:
+                output = parse_markdown_output(payload.taskType, payload.markdown)
+            except ValueError as exc:
+                raise ApiError(422, "MARKDOWN_OUTPUT_INVALID", "Markdown 格式不完整，请核对标题、列表、正文和免责声明") from exc
+        elif payload.output is not None:
+            output = payload.output
+        else:
+            raise ApiError(422, "MANUAL_OUTPUT_REQUIRED", "请填写 Markdown 内容")
         try:
-            return content_repository.save_manual_output(user["id"], content_id, payload.taskType, payload.branchId, payload.revision, payload.output)
+            return content_repository.save_manual_output(user["id"], content_id, payload.taskType, payload.branchId, payload.revision, output)
         except ValueError as exc:
             code = str(exc)
             if code == "missing": raise ApiError(404, "CONTENT_NOT_FOUND", "内容或渠道分支不存在") from exc

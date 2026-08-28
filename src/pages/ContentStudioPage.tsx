@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { PageHeader } from "../components/PageHeader";
 import { EmptyState, ErrorState, LoadingState } from "../components/States";
 import { apiGet, apiJson, apiRequest, AppError, uploadVisualFile } from "../lib/api";
+import { isMarkdownTask, markdownTemplates, renderContentMarkdown } from "../lib/contentMarkdown";
 import type { ContentBranch, ContentItem, ContentReviewSummary, ContentReviewStatus, ContentType, GenerationJob, ProductSummary, ReviewTask, TrainingSession, VisualDraft, VisualLayout } from "../types";
 
 const labels = {
@@ -141,11 +142,12 @@ export function ContentStudioPage({ type }: { type: ContentType }) {
     finally { setBusy(false); }
   }
 
-  async function saveManual(taskType: string, output: Record<string, unknown>, branchId?: string) {
+  async function saveManual(taskType: string, content: Record<string, unknown> | string, branchId?: string) {
     if (!active) return;
     setBusy(true); setError(null);
     try {
-      const result = await apiJson<ContentItem>(`/contents/${active.id}/manual-output`, "PUT", { taskType, branchId: branchId ?? null, revision: active.revision, output });
+      const body = typeof content === "string" ? { markdown: content } : { output: content };
+      const result = await apiJson<ContentItem>(`/contents/${active.id}/manual-output`, "PUT", { taskType, branchId: branchId ?? null, revision: active.revision, ...body });
       setActive(result); setNotice("人工内容已保存，可继续确认");
     } catch (reason) { setError(reason instanceof AppError ? reason.message : "人工内容保存失败"); }
     finally { setBusy(false); }
@@ -277,7 +279,7 @@ export function ContentStudioPage({ type }: { type: ContentType }) {
   </div>;
 }
 
-function Studio({ type, item, busy, onBack, onRun, onRetry, onCancel, onConfirm, onSaveManual, onUnlockCopy, onUnlockScript, onSaveVisualLayout, onUploadVisual, onSaveTrainingSession, onSubmitTrainingQuiz, onResetTrainingQuiz, onSubmitReview, onWithdrawReview, onReopenReview }: { type: ContentType; item: ContentItem; busy: boolean; onBack: () => void; onRun: (task: string, branchId?: string, instruction?: string) => Promise<void>; onRetry: (job: GenerationJob) => Promise<void>; onCancel: (job: GenerationJob) => Promise<void>; onConfirm: (node: string, branchId?: string) => Promise<void>; onSaveManual: (task: string, output: Record<string, unknown>, branchId?: string) => Promise<void>; onUnlockCopy: () => Promise<void>; onUnlockScript: () => Promise<void>; onSaveVisualLayout: (layout: Pick<VisualLayout, "template" | "palette" | "blockOrder" | "hiddenBlockIds">) => Promise<void>; onUploadVisual: (file: File) => Promise<void>; onSaveTrainingSession: (session: Pick<TrainingSession, "chapterIndex" | "sentenceIndex" | "playbackRate" | "mode" | "answers">) => Promise<void>; onSubmitTrainingQuiz: (answers: string[]) => Promise<void>; onResetTrainingQuiz: () => Promise<void>; onSubmitReview: (branchId?: string) => Promise<void>; onWithdrawReview: (taskId: string) => Promise<void>; onReopenReview: (branchId?: string) => Promise<void> }) {
+function Studio({ type, item, busy, onBack, onRun, onRetry, onCancel, onConfirm, onSaveManual, onUnlockCopy, onUnlockScript, onSaveVisualLayout, onUploadVisual, onSaveTrainingSession, onSubmitTrainingQuiz, onResetTrainingQuiz, onSubmitReview, onWithdrawReview, onReopenReview }: { type: ContentType; item: ContentItem; busy: boolean; onBack: () => void; onRun: (task: string, branchId?: string, instruction?: string) => Promise<void>; onRetry: (job: GenerationJob) => Promise<void>; onCancel: (job: GenerationJob) => Promise<void>; onConfirm: (node: string, branchId?: string) => Promise<void>; onSaveManual: (task: string, content: Record<string, unknown> | string, branchId?: string) => Promise<void>; onUnlockCopy: () => Promise<void>; onUnlockScript: () => Promise<void>; onSaveVisualLayout: (layout: Pick<VisualLayout, "template" | "palette" | "blockOrder" | "hiddenBlockIds">) => Promise<void>; onUploadVisual: (file: File) => Promise<void>; onSaveTrainingSession: (session: Pick<TrainingSession, "chapterIndex" | "sentenceIndex" | "playbackRate" | "mode" | "answers">) => Promise<void>; onSubmitTrainingQuiz: (answers: string[]) => Promise<void>; onResetTrainingQuiz: () => Promise<void>; onSubmitReview: (branchId?: string) => Promise<void>; onWithdrawReview: (taskId: string) => Promise<void>; onReopenReview: (branchId?: string) => Promise<void> }) {
   const overallLocked = type !== "article" && item.status !== "draft";
   const overallComplete = type === "image" ? item.payload.copyStatus === "confirmed" && item.payload.visual?.status === "draft" : type === "training" ? item.payload.scriptStatus === "confirmed" : false;
   return <div className="page-stack"><button className="back-link studio-back" type="button" onClick={onBack}>← 返回项目列表</button><section className="panel studio-summary"><div><span className="eyebrow">CONTENT DRAFT</span><h2>{item.title}</h2><p>修订 {item.revision} · {item.productId ? "使用已确认产品" : "使用人工素材"}</p></div><span className="status-badge">{item.status}</span></section>
@@ -296,8 +298,8 @@ function ImageStudio({ item, busy, onRun, onConfirm, onSaveManual, onUnlockCopy,
   return <div className="image-studio-stack">
     <section className="panel studio-node">
       <div className="panel__heading"><div><span className="eyebrow">COPY FIRST</span><h2>图片文案确认</h2></div><span className="status-badge">{confirmed ? "已确认" : copy ? "待确认" : "未生成"}</span></div>
-      {copy ? <pre className="structured-output">{pretty(copy)}</pre> : <p className="studio-hint">生成标题、卖点、区块结构和必要免责声明；确认文案前不会产生图片费用。</p>}
-      <ManualJsonEditor task="image_copy" value={copy} disabled={busy || confirmed} onSave={(output) => onSaveManual("image_copy", output)} />
+      {copy ? <pre className="structured-output structured-output--markdown">{renderContentMarkdown("image_copy", copy)}</pre> : <p className="studio-hint">生成 Markdown 标题、卖点、画面区块和必要免责声明；确认文案前不会产生图片费用。</p>}
+      <ManualContentEditor task="image_copy" value={copy} disabled={busy || confirmed} onSave={(output) => onSaveManual("image_copy", output)} />
       <div className="node-actions">
         <button className="button button--secondary" type="button" disabled={busy || confirmed} onClick={() => void onRun("image_copy", undefined, copy ? "在保留事实的前提下优化表达" : "")}>{copy ? "重新生成文案" : "生成图片文案"}</button>
         {copy && !confirmed && <button className="button" type="button" disabled={busy} onClick={() => void onConfirm("copy")}>确认文案</button>}
@@ -343,7 +345,14 @@ function VisualEditor({ visual, busy, onSave, onUpload }: { visual: VisualDraft;
 function ArticleBranch({ item, branch, busy, onRun, onConfirm, onSaveManual, onSubmitReview, onWithdrawReview, onReopenReview }: { item: ContentItem; branch: ContentBranch; busy: boolean; onRun: any; onConfirm: any; onSaveManual: any; onSubmitReview: (branchId?: string) => Promise<void>; onWithdrawReview: (taskId: string) => Promise<void>; onReopenReview: (branchId?: string) => Promise<void> }) {
   const reviewStatus = branch.reviewStatus ?? "draft";
   const locked = reviewStatus !== "draft";
-  return <section className="panel studio-node"><div className="panel__heading"><div><span className="eyebrow">{branch.channel.toUpperCase()}</span><h2>{channelLabel[branch.channel]}分支</h2></div><span className="status-badge">{reviewStatus === "draft" ? `框架 ${branch.outlineStatus}` : reviewStatus}</span></div>{branch.outlineStatus === "empty" ? <p className="studio-hint">该渠道拥有独立框架、失败和重试状态。</p> : <pre className="structured-output">{pretty(branch.outline)}</pre>}<ManualJsonEditor task="article_outline" value={branch.outline} disabled={busy || locked || branch.outlineStatus === "confirmed"} onSave={(output) => onSaveManual("article_outline", output, branch.id)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || locked || branch.outlineStatus === "confirmed"} onClick={() => void onRun("article_outline", branch.id)}>{branch.outlineStatus === "empty" ? "生成框架" : "重新生成框架"}</button>{branch.outlineStatus === "draft" && <button className="button" type="button" disabled={busy || locked} onClick={() => void onConfirm("outline", branch.id)}>确认框架</button>}</div>{branch.outlineStatus === "confirmed" && <div className="article-body"><h3>完整文章</h3>{branch.bodyStatus === "empty" ? <p className="studio-hint">框架已锁定，可以生成全文。</p> : <pre className="structured-output">{pretty(branch.body)}</pre>}<ManualJsonEditor task="article_generate" value={branch.body} disabled={busy || locked || branch.bodyStatus === "confirmed"} onSave={(output) => onSaveManual("article_generate", output, branch.id)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || locked || branch.bodyStatus === "confirmed"} onClick={() => void onRun("article_generate", branch.id)}>{branch.bodyStatus === "empty" ? "生成全文" : "重新生成全文"}</button>{branch.bodyStatus === "draft" && <button className="button" type="button" disabled={busy || locked} onClick={() => void onConfirm("body", branch.id)}>确认全文</button>}</div></div>}<ReviewWorkflowCard item={item} branchId={branch.id} status={reviewStatus} complete={branch.bodyStatus === "confirmed"} busy={busy} onSubmit={() => onSubmitReview(branch.id)} onWithdraw={onWithdrawReview} onReopen={() => onReopenReview(branch.id)} /></section>;
+  return <section className="panel studio-node">
+    <div className="panel__heading"><div><span className="eyebrow">{branch.channel.toUpperCase()}</span><h2>{channelLabel[branch.channel]}分支</h2></div><span className="status-badge">{reviewStatus === "draft" ? `框架 ${branch.outlineStatus}` : reviewStatus}</span></div>
+    {branch.outlineStatus === "empty" ? <p className="studio-hint">该渠道拥有独立 Markdown 框架、失败和重试状态。</p> : <pre className="structured-output structured-output--markdown">{renderContentMarkdown("article_outline", branch.outline)}</pre>}
+    <ManualContentEditor task="article_outline" value={branch.outline} disabled={busy || locked || branch.outlineStatus === "confirmed"} onSave={(output) => onSaveManual("article_outline", output, branch.id)} />
+    <div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || locked || branch.outlineStatus === "confirmed"} onClick={() => void onRun("article_outline", branch.id)}>{branch.outlineStatus === "empty" ? "生成 Markdown 框架" : "重新生成框架"}</button>{branch.outlineStatus === "draft" && <button className="button" type="button" disabled={busy || locked} onClick={() => void onConfirm("outline", branch.id)}>确认框架</button>}</div>
+    {branch.outlineStatus === "confirmed" && <div className="article-body"><h3>完整文章</h3>{branch.bodyStatus === "empty" ? <p className="studio-hint">框架已锁定，可以生成 Markdown 全文。</p> : <pre className="structured-output structured-output--markdown">{renderContentMarkdown("article_generate", branch.body)}</pre>}<ManualContentEditor task="article_generate" value={branch.body} disabled={busy || locked || branch.bodyStatus === "confirmed"} onSave={(output) => onSaveManual("article_generate", output, branch.id)} /><div className="node-actions"><button className="button button--secondary" type="button" disabled={busy || locked || branch.bodyStatus === "confirmed"} onClick={() => void onRun("article_generate", branch.id)}>{branch.bodyStatus === "empty" ? "生成 Markdown 全文" : "重新生成全文"}</button>{branch.bodyStatus === "draft" && <button className="button" type="button" disabled={busy || locked} onClick={() => void onConfirm("body", branch.id)}>确认全文</button>}</div></div>}
+    <ReviewWorkflowCard item={item} branchId={branch.id} status={reviewStatus} complete={branch.bodyStatus === "confirmed"} busy={busy} onSubmit={() => onSubmitReview(branch.id)} onWithdraw={onWithdrawReview} onReopen={() => onReopenReview(branch.id)} />
+  </section>;
 }
 
 function TrainingStudio({ item, busy, editLocked, onRun, onConfirm, onSaveManual, onUnlockScript, onSaveSession, onSubmitQuiz, onResetQuiz }: any) {
@@ -494,7 +503,7 @@ function TrainingPlayer({ item, busy, onSaveSession, onSubmitQuiz, onResetQuiz }
     {playerNotice && <div className="training-notice" role="status">{playerNotice}</div>}
     <div className="training-player-grid">
       <nav className="training-chapters" aria-label="课程章节">{script.chapters.map((itemChapter, index) => <button type="button" className={index === chapterIndex ? "is-active" : ""} aria-current={index === chapterIndex ? "step" : undefined} onClick={() => chooseChapter(index)} key={`${itemChapter.title}-${index}`}><span>{String(index + 1).padStart(2, "0")}</span><strong>{itemChapter.title}</strong></button>)}</nav>
-      <div className={`training-stage training-stage--${playState}`}><div className="training-avatar" aria-label={`二维动画讲师${playState === "speaking" ? "正在讲解" : "待机"}`}><span className="training-avatar__head"><i /><b /></span><span className="training-avatar__body" /></div><div className="training-subtitle" aria-live="polite"><small>{chapter?.title}</small><p>{sentences[safeSentenceIndex]}</p><span>字幕 {safeSentenceIndex + 1} / {sentences.length}</span></div></div>
+      <div className={`training-stage training-stage--${playState}`}><div className="training-avatar" aria-label={`黄色三维吉祥物数字讲师${playState === "speaking" ? "正在讲解" : "待机"}`}><img src="/training-presenter-v2.png" alt="" draggable="false" /></div><div className="training-subtitle" aria-live="polite"><small>{chapter?.title}</small><p>{sentences[safeSentenceIndex]}</p><span>字幕 {safeSentenceIndex + 1} / {sentences.length}</span></div></div>
       <aside className="training-knowledge"><span className="eyebrow">KNOWLEDGE CARD</span><h3>本章知识卡</h3><p>{chapter?.knowledgeCard}</p><label className="field"><span>播放语速</span><select aria-label="培训播放语速" value={playbackRate} onChange={(event) => { const next = Number(event.target.value); stopPlayback(); setPlaybackRate(next); void persist({ playbackRate: next }); }}><option value="0.75">0.75×</option><option value="1">1.0×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option></select></label><button className="button button--secondary" type="button" onClick={() => { stopPlayback(); const next = mode === "voice" ? "silent" : "voice"; setMode(next); setPlayerNotice(next === "silent" ? "已手动切换为静默字幕模式" : "已切换为中文语音模式"); void persist({ mode: next }); }}>{mode === "voice" ? "切换静默字幕" : "尝试中文语音"}</button></aside>
     </div>
     <div className="training-controls"><button className="button" type="button" onClick={() => playSentence(safeSentenceIndex)} disabled={!sentences.length}>{playState === "idle" ? "播放当前章节" : "从当前句播放"}</button><button className="button button--secondary" type="button" onClick={pauseOrContinue} disabled={playState === "idle"}>{playState === "paused" ? "继续" : "暂停"}</button><button className="button button--secondary" type="button" onClick={() => { stopPlayback(); setSentenceIndex(0); playSentence(0); }}>重播本章</button><span>{mode === "voice" ? "中文语音 + 同步字幕" : "静默字幕模式"}</span></div>
@@ -536,12 +545,30 @@ function JobPanel({ item, jobs, busy, onRetry, onCancel }: { item: ContentItem; 
 }
 
 const manualTemplates: Record<string, Record<string, unknown>> = {
-  image_copy: { title: "", sellingPoints: [], blocks: [], disclaimer: "" },
-  article_outline: { title: "", sections: [] },
-  article_generate: { title: "", paragraphs: [], disclaimer: "" },
   training_outline: { title: "", chapters: [] },
   training_script: { chapters: [], questions: [{}, {}, {}] },
 };
+
+function ManualContentEditor({ task, value, disabled, onSave }: { task: string; value: Record<string, any> | undefined; disabled: boolean; onSave: (content: string | Record<string, unknown>) => Promise<void> }) {
+  if (isMarkdownTask(task)) return <ManualMarkdownEditor task={task} value={value} disabled={disabled} onSave={onSave} />;
+  return <ManualJsonEditor task={task} value={value} disabled={disabled} onSave={onSave} />;
+}
+
+function ManualMarkdownEditor({ task, value, disabled, onSave }: { task: string; value: Record<string, any> | undefined; disabled: boolean; onSave: (content: string | Record<string, unknown>) => Promise<void> }) {
+  const initial = renderContentMarkdown(task, value) || markdownTemplates[task] || "";
+  const [text, setText] = useState(initial);
+  const [localError, setLocalError] = useState<string | null>(null);
+  useEffect(() => {
+    setText(renderContentMarkdown(task, value) || markdownTemplates[task] || "");
+    setLocalError(null);
+  }, [task, value]);
+  function save() {
+    if (!text.trim().startsWith("# ")) { setLocalError("Markdown 必须以一级标题“# 标题”开始"); return; }
+    if (/<\s*\/?\s*[A-Za-z][^>]*>/.test(text)) { setLocalError("Markdown 不允许包含 HTML 标签"); return; }
+    setLocalError(null); void onSave(text.trim());
+  }
+  return <details className="manual-json manual-markdown"><summary>人工填写 / 编辑 Markdown</summary><p>使用标题、列表和自然段即可，不需要填写 JSON。</p><textarea aria-label={`${task} 人工内容`} rows={12} value={text} disabled={disabled} spellCheck={false} onChange={(event) => setText(event.target.value)} /><div>{localError && <span role="alert">{localError}</span>}<button className="button button--secondary" type="button" disabled={disabled} onClick={save}>保存 Markdown</button></div></details>;
+}
 
 function ManualJsonEditor({ task, value, disabled, onSave }: { task: string; value: Record<string, unknown> | undefined; disabled: boolean; onSave: (output: Record<string, unknown>) => Promise<void> }) {
   const [text, setText] = useState(pretty(value && Object.keys(value).length ? value : manualTemplates[task]));

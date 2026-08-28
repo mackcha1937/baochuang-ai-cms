@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from backend.ai_content import DeepSeekProvider, GroundingError, ProviderError, repair_training_script_grounding, validate_grounding, validate_output
 from backend.config import Settings
 from backend.main import create_app
+from backend.markdown_content import render_markdown_output
 
 
 OUTPUTS = {
@@ -215,11 +216,11 @@ def deepseek_payload(content: str) -> dict[str, Any]:
     return {"choices": [{"message": {"content": content}}]}
 
 
-def test_deepseek_json_retry_and_request_security(monkeypatch) -> None:
+def test_deepseek_markdown_retry_and_request_security(monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
     responses = [
         StubResponse(200, deepseek_payload("")),
-        StubResponse(200, deepseek_payload(__import__("json").dumps(OUTPUTS["image_copy"], ensure_ascii=False))),
+        StubResponse(200, deepseek_payload(render_markdown_output("image_copy", OUTPUTS["image_copy"]))),
     ]
 
     def fake_post(url: str, **kwargs: Any) -> StubResponse:
@@ -231,14 +232,29 @@ def test_deepseek_json_retry_and_request_security(monkeypatch) -> None:
     result = provider.generate("image_copy", {"manualSource": "严格依据素材"})
     assert result["title"] == "守护每一步" and len(calls) == 2
     assert calls[0]["headers"]["Authorization"].split() == ["Bearer", "secret-not-for-storage"]
-    assert calls[0]["json"]["response_format"] == {"type": "json_object"}
+    assert "response_format" not in calls[0]["json"]
     assert calls[0]["json"]["thinking"] == {"type": "disabled"}
     assert calls[0]["json"]["temperature"] == 0.2
     assert calls[0]["json"]["messages"][1]["content"].startswith('{"source":')
     assert '"numericWhitelist": []' in calls[0]["json"]["messages"][1]["content"]
-    assert "合法 JSON" in calls[0]["json"]["messages"][0]["content"]
-    assert "字段结构未通过校验" in calls[1]["json"]["messages"][-1]["content"]
+    assert "Markdown" in calls[0]["json"]["messages"][0]["content"]
+    assert "Markdown 标题结构未通过校验" in calls[1]["json"]["messages"][-1]["content"]
     assert "secret-not-for-storage" not in str(calls[0]["json"])
+
+
+def test_deepseek_training_output_remains_json(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_post(url: str, **kwargs: Any) -> StubResponse:
+        calls.append({"url": url, **kwargs})
+        return StubResponse(200, deepseek_payload(__import__("json").dumps(OUTPUTS["training_outline"], ensure_ascii=False)))
+
+    monkeypatch.setattr("backend.ai_content.httpx.post", fake_post)
+    provider = DeepSeekProvider(api_key="training-key-not-for-storage", model="deepseek-v4-flash", endpoint="https://api.deepseek.com/chat/completions")
+    result = provider.generate("training_outline", {"manualSource": "培训素材"})
+    assert result == OUTPUTS["training_outline"]
+    assert calls[0]["json"]["response_format"] == {"type": "json_object"}
+    assert "只返回一个 JSON 对象" in calls[0]["json"]["messages"][0]["content"]
 
 
 @pytest.mark.parametrize(
@@ -264,7 +280,7 @@ def test_deepseek_public_error_mapping(monkeypatch, effect: Any, expected_code: 
     assert "server-only-key" not in caught.value.message
 
 
-def test_deepseek_rejects_invalid_json_after_retry(monkeypatch) -> None:
+def test_deepseek_rejects_invalid_markdown_after_retry(monkeypatch) -> None:
     attempts = 0
 
     def invalid_response(*args: Any, **kwargs: Any) -> StubResponse:
@@ -300,8 +316,8 @@ def test_numeric_grounding_rejects_unconfirmed_claims() -> None:
 def test_deepseek_retries_ungrounded_numbers(monkeypatch) -> None:
     ungrounded = {**OUTPUTS["image_copy"], "sellingPoints": ["额外赔付120%"]}
     responses = [
-        StubResponse(200, deepseek_payload(__import__("json").dumps(ungrounded, ensure_ascii=False))),
-        StubResponse(200, deepseek_payload(__import__("json").dumps(OUTPUTS["image_copy"], ensure_ascii=False))),
+        StubResponse(200, deepseek_payload(render_markdown_output("image_copy", ungrounded))),
+        StubResponse(200, deepseek_payload(render_markdown_output("image_copy", OUTPUTS["image_copy"]))),
     ]
     calls: list[dict[str, Any]] = []
 

@@ -13,6 +13,7 @@ import httpx
 
 from backend.database import Database, now_iso
 from backend.image_generation import ImageProvider, VisualCancelled, VisualProviderError, VisualResult
+from backend.markdown_content import MARKDOWN_TASKS, parse_markdown_output
 
 
 TASK_REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
@@ -30,15 +31,30 @@ CONTENT_TASKS: dict[str, set[str]] = {
 }
 
 SYSTEM_PROMPTS = {
-    "image_copy": """你是保险营销文案助手。只依据输入事实，不得编造数字。只返回一个 JSON 对象，不要 Markdown。必须严格使用以下结构和字段类型：
-{"title":"非空字符串","sellingPoints":["非空字符串"],"blocks":[{"type":"hero","text":"非空字符串"}],"disclaimer":"非空字符串"}
-sellingPoints 和 blocks 至少各有一项；blocks 每项只能用 type 和 text 表达。""",
-    "article_outline": """你是保险内容策划。按指定渠道策划，只依据输入事实。只返回一个 JSON 对象，不要 Markdown。必须严格使用以下结构和字段类型：
-{"title":"非空字符串","sections":[{"heading":"非空字符串","points":["非空字符串"]}]}
-sections 和每个 points 至少各有一项。""",
-    "article_generate": """你是保险文章编辑。严格按已确认框架写作，不得编造产品事实。只返回一个 JSON 对象，不要 Markdown。必须严格使用以下结构和字段类型：
-{"title":"非空字符串","paragraphs":["非空字符串"],"disclaimer":"非空字符串"}
-paragraphs 至少有一项。""",
+    "image_copy": """你是保险营销文案助手。只依据输入事实，不得编造数字。只返回 Markdown，不要 JSON、代码围栏或 HTML。必须严格使用：
+# 标题
+## 核心卖点
+- 至少一条卖点
+## 画面区块
+### hero
+非空区块文案
+## 免责声明
+非空免责声明
+核心卖点至少一项；画面区块至少一个三级标题，每个区块标题是简短英文类型。""",
+    "article_outline": """你是保险内容策划。按指定渠道策划，只依据输入事实。只返回 Markdown，不要 JSON、代码围栏或 HTML。必须严格使用：
+# 文章标题
+## 第一节标题
+- 至少一条写作要点
+## 第二节标题
+- 至少一条写作要点
+至少一个二级标题，每节至少一条列表要点。""",
+    "article_generate": """你是保险文章编辑。严格按已确认框架写作，不得编造产品事实。只返回 Markdown，不要 JSON、代码围栏或 HTML。必须严格使用：
+# 文章标题
+## 正文
+正文段落，段落之间保留空行。
+## 免责声明
+非空免责声明
+正文至少一个非空段落。""",
     "training_outline": """你是保险培训课程设计师。只返回一个 JSON 对象，不要 Markdown。必须严格使用以下结构和字段类型：
 {"title":"非空字符串","chapters":[{"title":"非空字符串","objective":"非空字符串"}]}
 chapters 至少有一项。""",
@@ -81,19 +97,23 @@ class DeepSeekProvider:
             raise ProviderError("AI_TASK_UNSUPPORTED", "不支持的 AI 任务")
         numeric_whitelist = sorted(grounding_numbers(snapshot))
         prompt_input = {"source": snapshot, "numericWhitelist": numeric_whitelist}
+        markdown_task = task_type in MARKDOWN_TASKS
+        output_instruction = "必须输出符合模板的 Markdown。" if markdown_task else "必须输出合法 JSON。"
         request_body = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPTS[task_type] + " 必须输出合法 JSON。任何阿拉伯数字或百分比都必须逐字匹配 numericWhitelist；枚举顺序使用中文，不得新增白名单外数字。百分比、年龄、天数等单位含义不得互换，例如 60% 不能写成60岁。"},
+                {"role": "system", "content": SYSTEM_PROMPTS[task_type] + " " + output_instruction + "任何阿拉伯数字或百分比都必须逐字匹配 numericWhitelist；枚举顺序使用中文，不得新增白名单外数字。百分比、年龄、天数等单位含义不得互换，例如 60% 不能写成60岁。"},
                 {"role": "user", "content": json.dumps(prompt_input, ensure_ascii=False)},
             ],
             "thinking": {"type": "disabled"},
-            "response_format": {"type": "json_object"},
             "max_tokens": 4096,
             "temperature": 0.2,
             "stream": False,
         }
+        if not markdown_task:
+            request_body["response_format"] = {"type": "json_object"}
         last_grounding_error: Optional[GroundingError] = None
+        result: Any = None
         for attempt in range(3):
             try:
                 response = httpx.post(
@@ -115,7 +135,7 @@ class DeepSeekProvider:
             content = ""
             try:
                 content = response.json()["choices"][0]["message"]["content"]
-                result = json.loads(content) if content else None
+                result = parse_markdown_output(task_type, content) if markdown_task else (json.loads(content) if content else None)
                 validate_output(task_type, result)
                 validate_grounding(snapshot, result)
                 return result
@@ -126,9 +146,9 @@ class DeepSeekProvider:
                         {"role": "assistant", "content": content or ""},
                         {
                             "role": "user",
-                            "content": "上一份 JSON 包含白名单外数字或百分比："
+                            "content": ("上一份 Markdown" if markdown_task else "上一份 JSON") + " 包含白名单外数字或百分比："
                             + "、".join(sorted(exc.unexpected_numbers))
-                            + "。请在上一份 JSON 基础上逐项修订：删除无来源事实，数字型错误选项改为不含数字的描述型选项；不得改变字段结构，不得新增其他数字。只返回完整修正 JSON。",
+                            + ("。请保持 Markdown 标题结构逐项修订，删除无来源事实，不得新增其他数字，只返回完整修正 Markdown。" if markdown_task else "。请在上一份 JSON 基础上逐项修订：删除无来源事实，数字型错误选项改为不含数字的描述型选项；不得改变字段结构，不得新增其他数字。只返回完整修正 JSON。"),
                         },
                     ])
                     continue
@@ -136,7 +156,7 @@ class DeepSeekProvider:
                 if attempt < 2:
                     request_body["messages"].extend([
                         {"role": "assistant", "content": content or ""},
-                        {"role": "user", "content": "上一份输出为空、不是合法 JSON 或字段结构未通过校验。请逐字使用系统消息规定的字段名和字段类型，只返回完整修正 JSON。"},
+                        {"role": "user", "content": "上一份输出为空、Markdown 标题结构未通过校验或包含不允许的 HTML。请严格使用系统消息规定的 Markdown 模板，只返回完整修正 Markdown。" if markdown_task else "上一份输出为空、不是合法 JSON 或字段结构未通过校验。请逐字使用系统消息规定的字段名和字段类型，只返回完整修正 JSON。"},
                     ])
                     continue
         if last_grounding_error is not None:
@@ -949,7 +969,8 @@ class ContentRepository:
                 payload = json.loads(connection.execute("SELECT payload_json FROM content_items WHERE id = ?", (content_id,)).fetchone()[0])
                 if payload.get("outlineStatus") != "confirmed": raise ValueError("outline_not_confirmed")
             self._apply_output(connection, content_id, branch_id, task_type, output)
-            Database._audit(connection, actor_id, "content.manual", "content", content_id, f"人工保存 {task_type} 结构化内容")
+            content_format = "Markdown" if task_type in MARKDOWN_TASKS else "结构化"
+            Database._audit(connection, actor_id, "content.manual", "content", content_id, f"人工保存 {task_type} {content_format}内容")
         result = self.get_item(content_id)
         assert result is not None
         return result

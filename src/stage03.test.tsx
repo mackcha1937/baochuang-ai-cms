@@ -65,7 +65,7 @@ describe("Stage 03 AI content studio", () => {
     fireEvent.click(await screen.findByRole("button", { name: /双渠道文章/ }));
     expect(await screen.findByText("公众号分支")).toBeInTheDocument();
     expect(screen.getByText("小红书分支")).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "生成框架" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "生成 Markdown 框架" })).toHaveLength(2);
     expect(screen.getAllByLabelText("article_outline 人工内容").every((editor) => !editor.hasAttribute("disabled"))).toBe(true);
     await waitFor(() => expect(screen.getByText(/修订 1/)).toBeInTheDocument());
   });
@@ -88,11 +88,13 @@ describe("Stage 03 AI content studio", () => {
     render(<ContentStudioPage type="image" />);
     fireEvent.click(await screen.findByRole("button", { name: /图片文案项目/ }));
     const editor = await screen.findByLabelText("image_copy 人工内容");
-    fireEvent.change(editor, { target: { value: JSON.stringify(persisted.payload.copy) } });
-    fireEvent.click(screen.getByRole("button", { name: "保存人工内容" }));
+    fireEvent.change(editor, { target: { value: "# 人工文案\n\n## 核心卖点\n- 事实卖点\n\n## 画面区块\n### hero\n保障介绍\n\n## 免责声明\n以合同为准" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存 Markdown" }));
     expect(await screen.findByText("人工内容已保存，可继续确认")).toBeInTheDocument();
-    expect(document.querySelector(".structured-output")).toHaveTextContent('"title": "人工文案"');
-    expect(JSON.parse((screen.getByLabelText("image_copy 人工内容") as HTMLTextAreaElement).value).title).toBe("人工文案");
+    expect(document.querySelector(".structured-output")).toHaveTextContent("# 人工文案");
+    expect((screen.getByLabelText("image_copy 人工内容") as HTMLTextAreaElement).value).toContain("## 核心卖点");
+    const request = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith("/manual-output") && init?.method === "PUT");
+    expect(JSON.parse(String(request?.[1]?.body))).toMatchObject({ markdown: expect.stringContaining("# 人工文案") });
     expect(screen.getByRole("button", { name: "确认文案" })).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/manual-output"), expect.objectContaining({ method: "PUT" }));
   });
